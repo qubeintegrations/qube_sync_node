@@ -1,11 +1,15 @@
 {
   "name": "qubesync",
   "version": "0.1.0",
-  "private": true,
   "description": "Verify and parse QuBe Sync webhooks (QuickBooks Desktop through qubesync.com).",
   "license": "MIT",
   "author": "QuBe Sync",
   "homepage": "https://docs.qubesync.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qubeintegrations/qube_sync_node.git"
+  },
+  "bugs": "https://github.com/qubeintegrations/qube_sync_node/issues",
   "keywords": [
     "qubesync",
     "quickbooks",

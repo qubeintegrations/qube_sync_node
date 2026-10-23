@@ -4,8 +4,9 @@ Verify and parse [QuBe Sync](https://qubesync.com) webhooks: QuickBooks Desktop 
 qubesync.com. Plain JavaScript, zero dependencies, Node 16.17 and later, CommonJS and ESM,
 TypeScript declarations included.
 
-> Not on npm yet: the package name isn't settled, so `package.json` is `"private": true`.
-> Install from a checkout (`npm install ../qube_sync_node`) for now.
+```bash
+npm install qubesync
+```
 
 ## Webhooks
 

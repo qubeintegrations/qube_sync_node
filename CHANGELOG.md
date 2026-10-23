@@ -14,4 +14,6 @@ First version: webhooks only.
   `sandbox`, `body`, `revision`, `reference` and `dedupeKey`; `newerThan(storedRevision)` on
   workflow runs and connections.
 - CommonJS and ESM entry points, TypeScript declarations, zero dependencies, Node 16.17 and later.
-- Tested against the server's own test vectors (`test/fixtures/test_vectors.json`).
+- Tested against the server's own test vectors (`test/fixtures/test_vectors.json`), and CI checks
+  that copy against https://qubesync.com/webhooks/test_vectors.json.
+- A `v*` tag publishes to npm (`release.yml`, with the `NPM_TOKEN` secret).
