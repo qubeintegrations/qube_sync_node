@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## Unreleased
+
+- Releases publish through npm trusted publishing, from `release.yml`'s OIDC token; no npm
+  token is stored.
+
+## 0.1.0 (2026-10-24)
 
 First version: webhooks only.
 
@@ -16,4 +21,4 @@ First version: webhooks only.
 - CommonJS and ESM entry points, TypeScript declarations, zero dependencies, Node 16.17 and later.
 - Tested against the server's own test vectors (`test/fixtures/test_vectors.json`), and CI checks
   that copy against https://qubesync.com/webhooks/test_vectors.json.
-- A `v*` tag publishes to npm (`release.yml`, with the `NPM_TOKEN` secret).
+- A `v*` tag publishes to npm (`release.yml`).

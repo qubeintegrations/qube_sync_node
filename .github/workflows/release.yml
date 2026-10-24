@@ -6,6 +6,8 @@ on:
     tags: ["v*"]
 permissions:
   contents: write
+  # Trusted publishing: npm takes this workflow's OIDC token, so no token is
+  # stored, and it adds the provenance statement itself.
   id-token: write
 jobs:
   release:
@@ -25,9 +27,9 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME doesn't match package.json version $version"
             exit 1
           fi
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - run: npm install -g npm@11.21.1
+      - run: npm publish --access public
       - run: |
           npm pack
           gh release create "$GITHUB_REF_NAME" qubesync-*.tgz --title "$GITHUB_REF_NAME" --notes "See [CHANGELOG.md](CHANGELOG.md)."
