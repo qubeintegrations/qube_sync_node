@@ -15,7 +15,8 @@ classes, a connection class) and updates the rest with `npm update`.
   `dig`, `asString`, `asNumber`, `asInteger`, `asDate`, `withoutNils`); `client()`.
 - `qubesync/express`, for Express 4 and 5 (an optional peer dependency): the `webhooks()`,
   `connect()` and `questions()` routers.
-- Unset, `authorizeQuestion` refuses every answer and search and logs why; `enqueue` runs jobs in
+- Unset, `authorizeQuestion` refuses every answer and search with a 403 and logs why (anything it
+  returns but `true` is a 404); `enqueue` runs jobs in
   the process after the response, and `dedupe` keeps delivery ids in memory, each warning once.
 
 ## 0.2.0 (2026-10-25)

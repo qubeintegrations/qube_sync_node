@@ -130,7 +130,8 @@ function connect(options) {
  *   POST /qube/questions/:operation/:record_id         a choice, with its fields
  *   GET  /qube/questions/:operation/:record_id/search  a record field's matches, as JSON
  * Mount it behind your sign-in and your CSRF protection. Each asks the authorizeQuestion setting
- * before anything else, and refuses every answer and search until it's set. options.limit: the
+ * before anything else: anything but true is a 404, and until it's set every answer and search is
+ * a 403 (logged), a setup mistake to see. options.limit: the
  * biggest form taken (default Express's 100 kb).
  */
 function questions(options) {

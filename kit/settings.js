@@ -182,8 +182,9 @@ const inMemoryDedupe = Object.freeze({
   },
 });
 
-// Until your app writes authorizeQuestion, every answer and search is refused: the record's id
-// comes from the URL, so it's all that keeps one customer's users off another's records.
+// Until your app writes authorizeQuestion, every answer and search is refused, with a 403 and
+// this warning, since it's a setup mistake to see: the record's id comes from the URL, so it's all
+// that keeps one customer's users off another's records.
 function refuseUnauthorized(request, record, operation) {
   const id = record && record.id;
   console.warn(
@@ -320,4 +321,5 @@ module.exports = {
   settings,
   resetSettings,
   settingsVersion,
+  refuseUnauthorized,
 };

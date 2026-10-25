@@ -349,7 +349,7 @@ module.exports = configure({
   currentAccount: (req) => Account.findByPk(req.user.accountId),
   // True when the signed-in user may answer or search this record's question. The record's id
   // comes from the URL, so this is all that keeps one customer's users off another's records:
-  // until it's set, every answer and search is refused (and logged).
+  // until it's set, every answer and search is refused with a 403 (and logged).
   authorizeQuestion: (req, record) => record.accountId === req.user.accountId,
   // Optional: a durable queue (below), and a dedupe store shared by every process.
   // enqueue: (job) => queue.add("webhook", job),
@@ -362,7 +362,7 @@ module.exports = configure({
 | `operations` | slug → operation class | none: throws |
 | `connection` | your connection class | none: throws |
 | `currentAccount` | `(req) → account` | none: throws |
-| `authorizeQuestion` | `(req, record, operation) → true` when the user may answer or search | refuses every answer and search, and logs why |
+| `authorizeQuestion` | `(req, record, operation) → true` when the user may answer or search; anything else is a 404 | refuses every answer and search with a 403, and logs why |
 | `enqueue` | `(job) →` hands `{ operation, recordId, body }` to your queue | in this process, after the response, one at a time, with a warning |
 | `dedupe` | `{ seen(key), remember(key) }` for notification delivery ids (may be async) | in this process's memory, with a warning |
 | `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl` | | the environment above; `webhookSecret` may be a list while one rotates |
@@ -396,7 +396,8 @@ app.use(requireSignIn); // your sign-in, and your CSRF protection
 app.use(qube.connect(config));
 
 // POST /qube/questions/:operation/:record_id (a choice) and GET .../search (a record field's
-// matches): each asks authorizeQuestion first, and the API key never reaches the browser.
+// matches): each asks authorizeQuestion first (anything but true is a 404; unset, a 403), and the
+// API key never reaches the browser.
 app.use(qube.questions(config));
 ```
 

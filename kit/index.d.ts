@@ -111,7 +111,7 @@ export interface SettingsOptions<Request = any> {
   currentAccount?: ((request: Request) => Awaitable<QubeAccount | null | undefined>) | null;
   /**
    * True when the signed-in user may answer or search `record`'s question. Unset, every answer and
-   * search is refused, and logged. Only `true` allows.
+   * search is refused with a 403, and logged. Only `true` allows: anything else is a 404.
    */
   authorizeQuestion?: ((request: Request, record: any, operation: string) => Awaitable<boolean>) | null;
   /** Hands a verified delivery to your queue, whose worker calls run(job). Default: in this process. */
@@ -265,7 +265,10 @@ export interface AnswerInput {
   request: any;
 }
 
-/** { status: 303 } once answered; else { status: 404 | 409 | 422, message } (plain text). */
+/**
+ * { status: 303 } once answered; else { status, message } (plain text): 403 while authorizeQuestion
+ * isn't set (logged), 404 not found or not allowed, 409 the question changed, 422 a field refused.
+ */
 export declare function answerQuestion(input: AnswerInput): Promise<{ status: number; message?: string }>;
 
 export interface SearchInput {
@@ -283,6 +286,10 @@ export interface SearchMatch {
   [key: string]: any;
 }
 
+/**
+ * { status, json }: 200 with the matches ([] outside the bounds), 403 [] while authorizeQuestion isn't
+ * set (logged), 404 [] not found or not allowed, 409 [] no longer searching, QuBe Sync's 4xx with [].
+ */
 export declare function searchQuestion(input: SearchInput): Promise<{ status: number; json: SearchMatch[] }>;
 
 /** The choice's fields from the form, each as its type. */

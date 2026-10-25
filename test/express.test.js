@@ -249,13 +249,16 @@ describe("express: questions", () => {
     };
   }
 
-  it("refuses every answer and search until authorizeQuestion is set, and logs why", async () => {
+  it("refuses every answer and search with a 403 until authorizeQuestion is set, and logs why", async () => {
     reset();
     const record = asking();
     const res = await request(app(), form({ choice: "skip" }));
-    assert.strictEqual(res.status, 404);
+    assert.strictEqual(res.status, 403);
+    assert.match(res.text, /authorizeQuestion setting isn't set/);
     const search = await request(app(), { path: "/qube/questions/create_invoice/7/search?field=customer&q=acme", headers: signedIn });
-    assert.strictEqual(search.status, 404);
+    assert.deepStrictEqual([search.status, JSON.parse(search.text)], [403, []]);
+    const missing = await request(app(), { ...form({ choice: "skip" }), path: "/qube/questions/create_invoice/999" });
+    assert.strictEqual(missing.status, 404); // no record: nothing to authorize
     assert.deepStrictEqual(fake.received, []);
     assert.ok(record.qube_question);
     const warnings = logged().filter((l) => /the authorizeQuestion setting isn't set/.test(l.text));
