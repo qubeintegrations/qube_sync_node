@@ -16,7 +16,13 @@ The v2 API client.
   iterator over every page), `discardRequest`; `request` for anything else.
 - Links are refused unless they're on the client's own origin.
 - Retries for retry-safe requests on a failed connection, a timeout, 429, 502, 503 and 504, with
-  `Retry-After` honoured up to 30 s.
+  `Retry-After` honoured up to 30 s. `answer` is retried when its link has a `prompt_token`.
+- `totalTimeout` (60000 ms): a call returns or rejects within it, retries and waits included; each
+  attempt's timeouts are cut to the time left, and a retry that would leave under 1 s isn't made.
+- `onRetry({ attempt, maxRetries, delayMs, elapsedMs, method, url, status, error })` before each
+  retry's wait; the URL without its query, never the key; a throw stops the call.
+- A retried DELETE that gets a 404 after an earlier attempt's answer was lost (a read timeout, a
+  reset after connecting, a 502 or 504) resolves to `null`, as a 204 would.
 - `APIError` with `status`, `code`, `message`, `errors`, `body` and `requestId`.
 - Releases publish through npm trusted publishing, from `release.yml`'s OIDC token; no npm
   token is stored.

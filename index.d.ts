@@ -165,6 +165,25 @@ export type ApiObject = { [key: string]: any };
 export type QueryValue = string | number | boolean | null | undefined;
 export type Query = { [key: string]: QueryValue | readonly QueryValue[] };
 
+/** What `onRetry` is told before each retry's wait. Never the API key, headers or body. */
+export interface RetryInfo {
+  /** The retry about to be made: 1, 2... */
+  readonly attempt: number;
+  readonly maxRetries: number;
+  /** The wait before it, in ms (the backoff, or the answer's Retry-After). */
+  readonly delayMs: number;
+  /** Ms since the call started. */
+  readonly elapsedMs: number;
+  /** Upper case. */
+  readonly method: string;
+  /** The request URL without its query string. */
+  readonly url: string;
+  /** The HTTP status that's retried, or null for a network failure or timeout. */
+  readonly status: number | null;
+  /** The network failure or timeout that's retried, or null for a status. */
+  readonly error: Error | null;
+}
+
 export interface ClientOptions {
   /** Your app's API key. Required; the client never reads the environment. */
   apiKey: string;
@@ -176,8 +195,14 @@ export interface ClientOptions {
   timeout?: number;
   /** Retries for a retry-safe request (GET, PUT, DELETE, or one with an Idempotency-Key). Default 2. */
   maxRetries?: number;
+  /** Ms a call may take, retries and their waits included. Default 60000. */
+  totalTimeout?: number;
+  /** Called before each retry's wait. Anything it throws stops the call and rejects with that error. */
+  onRetry?: (info: RetryInfo) => void;
   /** Waits between retries; for tests. Default: setTimeout. */
   sleep?: (ms: number) => Promise<void>;
+  /** A monotonic clock in ms; for tests. Default: performance.now. */
+  clock?: () => number;
 }
 
 export interface ConnectionOptions {
@@ -269,12 +294,14 @@ export declare class Client {
   readonly connectTimeout: number;
   readonly timeout: number;
   readonly maxRetries: number;
+  readonly totalTimeout: number;
   toJSON(): { baseUrl: string };
 
   createConnection(options: ConnectionOptions & { webhookUrl: string }): Promise<ApiObject>;
   getConnection(id: string): Promise<ApiObject>;
   listConnections(): Promise<ApiObject[]>;
   updateConnection(id: string, options: ConnectionOptions): Promise<ApiObject>;
+  /** Null on success, and on a retry's 404 after an earlier attempt's answer was lost. */
   deleteConnection(id: string): Promise<null>;
   regenerateOnboarding(id: string): Promise<ApiObject>;
   /** `{ id, password }`. Without `password`, QuBe Sync makes one. */
@@ -292,7 +319,10 @@ export declare class Client {
   /** The whole body, `{ data, next_after }`. */
   runEvents(connectionId: string, runId: string, options?: RunEventsOptions): Promise<RunEventsPage>;
 
-  /** Takes the prompt's `links.decisions`. */
+  /**
+   * Takes the prompt's `links.decisions`. Retried when the link has a `prompt_token`; a retry after
+   * a lost answer may reject with a 409 `prompt_changed`: the question has been answered.
+   */
   answer(decisionsUrl: string, options: AnswerOptions): Promise<ApiObject>;
   /** Takes the prompt's `links.search`. */
   search(searchUrl: string, options: SearchOptions): Promise<ApiObject[]>;

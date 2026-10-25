@@ -7,6 +7,7 @@ const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
 const util = require("util");
+const { performance } = require("perf_hooks");
 
 const DEFAULT_BASE_URL = "https://qubesync.com";
 const API_PATH = "/api/v2";
@@ -26,6 +27,12 @@ const RETRY_ERROR_CODES = new Set([
 const RETRY_SAFE_METHODS = new Set(["GET", "PUT", "DELETE"]);
 const QUEUE_METHODS = new Set(["GET", "POST", "PUT", "DELETE"]);
 const MESSAGE_BODY_LIMIT = 500;
+// A retry is made only when at least this much of the call's total time is left after its wait.
+const MIN_TIME_LEFT_MS = 1000;
+// Statuses that mean the request may have reached QuBe Sync and been acted on.
+const MAY_HAVE_ARRIVED_STATUSES = new Set([502, 504]);
+// Network errors raised after the connection opened: the request may have arrived.
+const mayHaveArrived = new WeakSet();
 
 function userAgent() {
   // Required lazily: index.js requires this file, and owns VERSION.
@@ -132,6 +139,19 @@ function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function defaultClock() {
+  return performance.now();
+}
+
+function hasPromptToken(pathOrUrl) {
+  try {
+    const token = new URL(pathOrUrl, "http://localhost").searchParams.get("prompt_token");
+    return typeof token === "string" && token !== "";
+  } catch (_error) {
+    return false;
+  }
+}
+
 function timeoutError(message) {
   const error = new Error(message);
   error.code = "ETIMEDOUT";
@@ -150,6 +170,8 @@ class Client {
   #apiRoot;
   #origin;
   #sleep;
+  #clock;
+  #onRetry;
 
   /**
    * @param {object} options
@@ -158,11 +180,24 @@ class Client {
    * @param {number} [options.connectTimeout=5000] ms to open the connection
    * @param {number} [options.timeout=30000] ms the socket may sit idle waiting for the answer
    * @param {number} [options.maxRetries=2]
+   * @param {number} [options.totalTimeout=60000] ms a call may take, retries and their waits included
+   * @param {(info: object) => void} [options.onRetry] called before each retry's wait; a throw stops the call
    * @param {(ms: number) => Promise<void>} [options.sleep] for tests
+   * @param {() => number} [options.clock] a monotonic clock in ms, for tests
    */
   constructor(options) {
     if (!isPlainObject(options)) throw new TypeError("new Client({ apiKey }) takes an options object");
-    const { apiKey, baseUrl = DEFAULT_BASE_URL, connectTimeout, timeout, maxRetries, sleep } = options;
+    const {
+      apiKey,
+      baseUrl = DEFAULT_BASE_URL,
+      connectTimeout,
+      timeout,
+      maxRetries,
+      totalTimeout,
+      onRetry,
+      sleep,
+      clock,
+    } = options;
     if (typeof apiKey !== "string" || apiKey === "") throw new TypeError("apiKey is required (a non-empty string)");
     if (typeof baseUrl !== "string" || baseUrl === "") throw new TypeError("baseUrl must be a non-empty string");
     const trimmed = baseUrl.replace(/\/+$/, "");
@@ -176,18 +211,27 @@ class Client {
       throw new TypeError(`baseUrl must be http or https: ${trimmed}`);
     }
     if (sleep !== undefined && typeof sleep !== "function") throw new TypeError("sleep must be a function");
+    if (clock !== undefined && typeof clock !== "function") throw new TypeError("clock must be a function");
+    if (onRetry !== undefined && onRetry !== null && typeof onRetry !== "function") {
+      throw new TypeError("onRetry must be a function");
+    }
     const retries = nonNegative(maxRetries, "maxRetries", 2);
+    const total = nonNegative(totalTimeout, "totalTimeout", 60000);
+    if (total === 0) throw new TypeError("totalTimeout must be more than 0");
     if (!Number.isInteger(retries)) throw new TypeError("maxRetries must be a whole number");
 
     this.#apiKey = apiKey;
     this.#origin = parsed.origin;
     this.#apiRoot = trimmed + API_PATH;
     this.#sleep = sleep || defaultSleep;
+    this.#clock = clock || defaultClock;
+    this.#onRetry = onRetry || null;
     Object.defineProperties(this, {
       baseUrl: { value: trimmed, enumerable: true },
       connectTimeout: { value: nonNegative(connectTimeout, "connectTimeout", 5000), enumerable: true },
       timeout: { value: nonNegative(timeout, "timeout", 30000), enumerable: true },
       maxRetries: { value: retries, enumerable: true },
+      totalTimeout: { value: total, enumerable: true },
     });
   }
 
@@ -279,7 +323,9 @@ class Client {
   async answer(decisionsUrl, { choice, data } = {}) {
     if (choice === undefined || choice === null) throw new TypeError("choice is required");
     const body = data === undefined || data === null ? { choice } : { choice, data };
-    return this.#data("POST", requireString(decisionsUrl, "decisionsUrl"), body);
+    // Safe to send again only while it names the question it answers: without a prompt_token a
+    // repeat could be taken for the run's next question.
+    return this.#data("POST", requireString(decisionsUrl, "decisionsUrl"), body, { retrySafe: hasPromptToken(decisionsUrl) });
   }
 
   async search(searchUrl, { field, q } = {}) {
@@ -376,17 +422,21 @@ class Client {
    * client's own origin (a run's or webhook's `links`).
    */
   async request(method, pathOrUrl, body, { query, headers } = {}) {
+    return this.#request(method, pathOrUrl, body, { query, headers });
+  }
+
+  async #request(method, pathOrUrl, body, { query, headers, retrySafe = false } = {}) {
     if (typeof method !== "string" || method === "") throw new TypeError("method is required");
     const verb = method.toUpperCase();
     const url = this.#resolve(pathOrUrl);
     appendQuery(url, query);
-    const response = await this.#send(verb, url, body, headers || {});
+    const response = await this.#send(verb, url, body, headers || {}, retrySafe);
     if (response.text === "") return null;
     return JSON.parse(response.text);
   }
 
   async #data(method, pathOrUrl, body, options) {
-    const parsed = await this.request(method, pathOrUrl, body, options);
+    const parsed = await this.#request(method, pathOrUrl, body, options);
     if (isPlainObject(parsed) && Object.prototype.hasOwnProperty.call(parsed, "data")) return parsed.data;
     return parsed;
   }
@@ -406,7 +456,7 @@ class Client {
     return url;
   }
 
-  async #send(method, url, body, extraHeaders) {
+  async #send(method, url, body, extraHeaders, forceRetrySafe) {
     const headers = {
       Accept: "application/json",
       "User-Agent": userAgent(),
@@ -423,42 +473,83 @@ class Client {
     headers.Authorization = `Basic ${Buffer.from(`${this.#apiKey}:`, "utf8").toString("base64")}`;
 
     const retrySafe =
-      RETRY_SAFE_METHODS.has(method) || Object.keys(headers).some((name) => name.toLowerCase() === "idempotency-key");
+      forceRetrySafe ||
+      RETRY_SAFE_METHODS.has(method) ||
+      Object.keys(headers).some((name) => name.toLowerCase() === "idempotency-key");
+    const started = this.#clock();
+    // A DELETE whose earlier attempt may have deleted the thing: a 404 on its retry is success.
+    let deletedEarlier = false;
+    const elapsed = () => this.#clock() - started;
 
     for (let attempt = 0; ; attempt += 1) {
       const canRetry = retrySafe && attempt < this.maxRetries;
+      const left = Math.max(0, this.totalTimeout - elapsed());
       let response;
       try {
-        response = await this.#once(method, url, headers, payload);
+        response = await this.#once(method, url, headers, payload, {
+          connectTimeout: Math.min(this.connectTimeout, left),
+          timeout: Math.min(this.timeout, left),
+        });
       } catch (error) {
         if (canRetry && error && RETRY_ERROR_CODES.has(error.code)) {
-          await this.#sleep(this.#backoff(attempt));
-          continue;
+          if (mayHaveArrived.has(error)) deletedEarlier = true;
+          if (await this.#retry(attempt, this.#backoff(attempt), elapsed, method, url, null, error)) continue;
         }
         throw error;
       }
       if (response.status >= 200 && response.status < 300) return response;
+      if (response.status === 404 && method === "DELETE" && deletedEarlier) {
+        return { status: 204, headers: response.headers, text: "" };
+      }
       if (canRetry && RETRY_STATUSES.has(response.status)) {
         const wait = retryAfterMs(response);
-        await this.#sleep(wait === null ? this.#backoff(attempt) : wait);
-        continue;
+        const delay = wait === null ? this.#backoff(attempt) : wait;
+        if (MAY_HAVE_ARRIVED_STATUSES.has(response.status)) deletedEarlier = true;
+        if (await this.#retry(attempt, delay, elapsed, method, url, response.status, null)) continue;
       }
       const requestId = response.headers["x-request-id"];
       throw new APIError(response.status, response.text, typeof requestId === "string" ? requestId : null);
     }
   }
 
+  // Waits and answers true when the retry fits in the call's total time; calls onRetry first.
+  async #retry(attempt, delayMs, elapsed, method, url, status, error) {
+    const elapsedMs = elapsed();
+    if (this.totalTimeout - elapsedMs - delayMs < MIN_TIME_LEFT_MS) return false;
+    if (this.#onRetry) {
+      this.#onRetry(
+        Object.freeze({
+          attempt: attempt + 1,
+          maxRetries: this.maxRetries,
+          delayMs,
+          elapsedMs,
+          method,
+          // Never the query: it can hold a search term or a prompt_token.
+          url: url.origin + url.pathname,
+          status,
+          error,
+        })
+      );
+    }
+    await this.#sleep(delayMs);
+    return true;
+  }
+
   #backoff(attempt) {
     return 500 * 2 ** attempt * (1 + Math.random() * 0.25);
   }
 
-  #once(method, url, headers, payload) {
+  #once(method, url, headers, payload, { connectTimeout, timeout }) {
     const transport = url.protocol === "https:" ? https : http;
-    const { connectTimeout, timeout } = this;
     return new Promise((resolve, reject) => {
       let connectTimer = null;
       let failure = null;
+      let connected = false;
       const req = transport.request(url, { method, headers });
+      const settleError = (error) => {
+        if (connected && error && typeof error === "object") mayHaveArrived.add(error);
+        reject(error);
+      };
       const fail = (error) => {
         if (!failure) failure = error;
         req.destroy(failure);
@@ -476,31 +567,36 @@ class Client {
             () => fail(timeoutError(`couldn't connect to ${url.origin} within ${connectTimeout} ms`)),
             connectTimeout
           );
+          // Over TLS the request can only arrive once the handshake is done.
+          socket.once(url.protocol === "https:" ? "secureConnect" : "connect", () => {
+            connected = true;
+          });
           socket.once("connect", () => {
             clear();
             startReadTimer();
           });
         } else {
+          connected = true;
           startReadTimer();
         }
       });
       req.on("error", (error) => {
         clear();
-        reject(failure || error);
+        settleError(failure || error);
       });
       req.on("close", clear);
       req.on("response", (res) => {
         const chunks = [];
         const cutOff = (error) => {
           clear();
-          reject(failure || error || Object.assign(new Error("the answer was cut off"), { code: "ECONNRESET" }));
+          settleError(failure || error || Object.assign(new Error("the answer was cut off"), { code: "ECONNRESET" }));
         };
         res.on("data", (chunk) => chunks.push(chunk));
         res.on("error", cutOff);
         res.on("aborted", () => cutOff(null));
         res.on("end", () => {
           clear();
-          if (failure) return reject(failure);
+          if (failure) return settleError(failure);
           resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString("utf8") });
         });
       });

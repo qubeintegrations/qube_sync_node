@@ -537,6 +537,199 @@ describe("Client: retries", () => {
   });
 });
 
+describe("Client: onRetry, totalTimeout and answer", () => {
+  function recorder() {
+    const calls = [];
+    const onRetry = (info) => {
+      assert.ok(Object.isFrozen(info));
+      calls.push(info);
+    };
+    return { calls, onRetry };
+  }
+
+  // A fake clock that moves only when the client sleeps (plus `extra` per sleep).
+  function fakeTime(extra = 0, real = false) {
+    let offset = 0;
+    return {
+      clock: () => (real ? require("node:perf_hooks").performance.now() : 0) + offset,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        offset += ms + extra;
+      },
+    };
+  }
+
+  it("calls onRetry before each retry of a 503, without the query or the key", async () => {
+    const { calls, onRetry } = recorder();
+    answer({ status: 503 }, { status: 503 }, { json: { data: [] } });
+    await client({ onRetry }).listRuns(CONN, { reference: "secret-search" });
+    assert.strictEqual(calls.length, 2);
+    calls.forEach((info, i) => {
+      assert.deepStrictEqual(Object.keys(info).sort(), ["attempt", "delayMs", "elapsedMs", "error", "maxRetries", "method", "status", "url"]);
+      assert.strictEqual(info.attempt, i + 1);
+      assert.strictEqual(info.maxRetries, 2);
+      assert.strictEqual(info.delayMs, sleeps[i]);
+      assert.ok(info.elapsedMs >= 0);
+      assert.strictEqual(info.method, "GET");
+      assert.strictEqual(info.url, `${base}/api/v2/connections/${CONN}/workflow-runs`);
+      assert.strictEqual(info.status, 503);
+      assert.strictEqual(info.error, null);
+    });
+    const shown = util.inspect(calls, { depth: 5 }) + JSON.stringify(calls);
+    assert.ok(!shown.includes(KEY) && !shown.includes(BASIC) && !shown.includes("secret-search"));
+  });
+
+  it("calls onRetry with the error of a reset connection", async () => {
+    const { calls, onRetry } = recorder();
+    answer({ destroy: true }, { json: { data: {} } });
+    await client({ onRetry }).getConnection(CONN);
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].status, null);
+    assert.ok(calls[0].error instanceof Error);
+    assert.strictEqual(calls[0].error.code, "ECONNRESET");
+  });
+
+  it("doesn't call onRetry on success, a 4xx or after the last try", async () => {
+    const { calls, onRetry } = recorder();
+    await client({ onRetry }).getConnection(CONN);
+    answer({ status: 404, json: { errors: { detail: "Not Found" } } });
+    await assert.rejects(client({ onRetry }).getConnection(CONN), APIError);
+    assert.strictEqual(calls.length, 0);
+    answer({ status: 503 });
+    await assert.rejects(client({ onRetry }).getConnection(CONN), APIError);
+    assert.strictEqual(calls.length, 2);
+  });
+
+  it("stops the call when onRetry throws", async () => {
+    answer({ status: 503 }, { json: { data: {} } });
+    const boom = new Error("stop");
+    await assert.rejects(
+      client({
+        onRetry: () => {
+          throw boom;
+        },
+      }).getConnection(CONN),
+      (error) => error === boom
+    );
+    assert.strictEqual(received.length, 1);
+    assert.deepStrictEqual(sleeps, []);
+  });
+
+  it("doesn't make a retry whose wait leaves under a second of totalTimeout", async () => {
+    const { calls, onRetry } = recorder();
+    answer({ status: 503 });
+    // 2000 ms: the first wait (500-625 ms) fits, the second (1000-1250 ms) doesn't.
+    await assert.rejects(client({ totalTimeout: 2000, onRetry, ...fakeTime() }).getConnection(CONN), (error) => error.status === 503);
+    assert.strictEqual(received.length, 2);
+    assert.strictEqual(sleeps.length, 1);
+    assert.strictEqual(calls.length, 1);
+  });
+
+  it("doesn't wait out a Retry-After beyond the limit, or shorten it", async () => {
+    const { calls, onRetry } = recorder();
+    answer({ status: 429, headers: { "retry-after": "20" } }, { json: { data: {} } });
+    await assert.rejects(client({ totalTimeout: 10000, onRetry, ...fakeTime() }).listConnections(), (error) => error.status === 429);
+    assert.strictEqual(received.length, 1);
+    assert.deepStrictEqual(sleeps, []);
+    assert.strictEqual(calls.length, 0);
+  });
+
+  it("caps a later attempt's read timeout to the time left", async () => {
+    // The wait takes 900 ms longer than planned, so the retry has ~200 ms left of 1700.
+    answer({ status: 503 }, { delay: 1500, json: { data: {} } });
+    const started = Date.now();
+    await assert.rejects(
+      client({ totalTimeout: 1700, timeout: 5000, maxRetries: 1, ...fakeTime(900, true) }).listConnections(),
+      (error) => {
+        assert.strictEqual(error.code, "ETIMEDOUT");
+        const ms = Number(/within (\d+(\.\d+)?) ms/.exec(error.message)[1]);
+        assert.ok(ms < 400, error.message);
+        return true;
+      }
+    );
+    assert.ok(Date.now() - started < 1000, "gave up when the total ran out");
+    assert.strictEqual(received.length, 2);
+  });
+
+  it("retries answer when its link has a prompt_token, and sends it once without", async () => {
+    const link = `${base}/api/v2/connections/${CONN}/workflow-runs/${RUN}/decisions`;
+    answer({ status: 503 }, { json: { data: { id: RUN } } });
+    assert.deepStrictEqual(await client().answer(`${link}?prompt_token=pt_1`, { choice: "create" }), { id: RUN });
+    assert.strictEqual(received.length, 2);
+    assert.deepStrictEqual(received[1].query, [["prompt_token", "pt_1"]]);
+    for (const url of [link, `${link}?prompt_token=`]) {
+      received = [];
+      answer({ status: 503 });
+      await assert.rejects(client().answer(url, { choice: "create" }), (error) => error.status === 503);
+      assert.strictEqual(received.length, 1, url);
+    }
+  });
+});
+
+describe("Client: a retried DELETE that finds nothing", () => {
+  const notFound = { status: 404, json: { errors: { detail: "Not Found" } } };
+
+  it("is success after a read timeout", async () => {
+    answer({ status: 204, delay: 300 }, notFound);
+    assert.strictEqual(await client({ timeout: 50 }).deleteConnection(CONN), null);
+    assert.deepStrictEqual(received.map((r) => r.method), ["DELETE", "DELETE"]);
+  });
+
+  it("is success after a reset connection, or a 502 or 504", async () => {
+    for (const first of [{ destroy: true }, { status: 502 }, { status: 504 }]) {
+      received = [];
+      answer(first, notFound);
+      assert.strictEqual(await client().deleteConnection(CONN), null, JSON.stringify(first));
+      assert.strictEqual(received.length, 2);
+    }
+    answer({ status: 504 }, notFound);
+    assert.strictEqual(await client().request("DELETE", `/connections/${CONN}/workflow-runs/${RUN}`), null);
+  });
+
+  it("raises on the first attempt's 404", async () => {
+    answer(notFound);
+    await assert.rejects(client().deleteConnection(CONN), (error) => error instanceof APIError && error.status === 404);
+    assert.strictEqual(received.length, 1);
+  });
+
+  it("raises after a 503 or a 429", async () => {
+    for (const first of [{ status: 503 }, { status: 429 }]) {
+      received = [];
+      answer(first, notFound);
+      await assert.rejects(client().deleteConnection(CONN), (error) => error.status === 404);
+      assert.strictEqual(received.length, 2);
+    }
+  });
+
+  it("raises after a refused connection", async () => {
+    // The first attempt finds nothing listening; the server opens on that port during the wait.
+    const later = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ errors: { detail: "Not Found" } }));
+    });
+    later.on("connection", (socket) => socket.unref());
+    await new Promise((resolve) => later.listen(0, "127.0.0.1", resolve));
+    const port = later.address().port;
+    await new Promise((resolve) => later.close(resolve));
+    const c = new Client({
+      apiKey: KEY,
+      baseUrl: `http://127.0.0.1:${port}`,
+      sleep: () => new Promise((resolve) => later.listen(port, "127.0.0.1", resolve)),
+    });
+    try {
+      await assert.rejects(c.deleteConnection(CONN), (error) => error instanceof APIError && error.status === 404);
+    } finally {
+      later.close();
+    }
+  });
+
+  it("leaves other methods' 404s alone", async () => {
+    answer({ status: 504 }, notFound);
+    await assert.rejects(client().getConnection(CONN), (error) => error.status === 404);
+  });
+});
+
 describe("APIError", () => {
   async function failWith(response) {
     answer(response);

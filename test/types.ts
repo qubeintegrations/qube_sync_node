@@ -12,6 +12,7 @@ import {
   ClientOptions,
   RequestsPage,
   RunEventsPage,
+  RetryInfo,
 } from "qubesync";
 
 declare const rawBody: Uint8Array;
@@ -55,7 +56,26 @@ try {
 // The v2 client.
 const clientOptions: ClientOptions = { apiKey: "sk_test", baseUrl: "https://qubesync.com", connectTimeout: 5000, timeout: 30000, maxRetries: 2 };
 const client = new Client(clientOptions);
-new Client({ apiKey: "sk_test", sleep: async (ms: number) => void ms });
+new Client({ apiKey: "sk_test", sleep: async (ms: number) => void ms, clock: () => 0 });
+new Client({
+  apiKey: "sk_test",
+  totalTimeout: 60000,
+  onRetry: (info: RetryInfo) => {
+    const parts: [number, number, number, number, string, string, number | null, Error | null] = [
+      info.attempt,
+      info.maxRetries,
+      info.delayMs,
+      info.elapsedMs,
+      info.method,
+      info.url,
+      info.status,
+      info.error,
+    ];
+    void parts;
+  },
+});
+const totalTimeout: number = new Client({ apiKey: "k" }).totalTimeout;
+void totalTimeout;
 const baseUrl: string = client.baseUrl;
 void baseUrl;
 

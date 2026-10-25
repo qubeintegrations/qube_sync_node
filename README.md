@@ -19,9 +19,9 @@ const { Client, APIError } = require("qubesync"); // or: import { Client, APIErr
 const qube = new Client({ apiKey: process.env.QUBE_API_KEY });
 ```
 
-`new Client({ apiKey, baseUrl = "https://qubesync.com", connectTimeout = 5000, timeout = 30000, maxRetries = 2 })`.
+`new Client({ apiKey, baseUrl = "https://qubesync.com", connectTimeout = 5000, timeout = 30000, maxRetries = 2, totalTimeout = 60000, onRetry })`.
 Timeouts are in milliseconds: `connectTimeout` to open the connection, `timeout` for the socket to
-sit idle waiting for the answer. Every method returns a Promise of the response's `data`, with
+sit idle waiting for the answer, and `totalTimeout` for the whole call (see below). Every method returns a Promise of the response's `data`, with
 the API's own snake_case keys (`webhook_url`, `total_pages`), or `null` for an empty answer.
 
 ### Onboarding a customer
@@ -106,8 +106,36 @@ QuBe Sync answers 429, 502, 503 or 504 (a 429 or 503's `Retry-After` is honoured
 - `startRun` sends `reference` as the Idempotency-Key, so a retried start never starts two runs.
 - `queue` and `queueQbxml` take `idempotencyKey`; left out, the client makes a UUID per call and
   sends it again on that call's retries, so a retry never queues a request twice.
-- The other POSTs (`createConnection`, `answer`, `cancelRun`, `setPassword`, `getQwc`,
+- `answer` is retried when its link has a `prompt_token` (a run's `links.decisions` always does
+  while it asks). A retry after a lost answer may reject with a `409` whose `code` is
+  `prompt_changed`: the question has been answered, by the first attempt or by someone else.
+  Without a `prompt_token` it's sent once, since a repeat could be taken for the run's next question.
+- The other POSTs (`createConnection`, `cancelRun`, `setPassword`, `getQwc`,
   `regenerateOnboarding`, `discardRequest`) are sent once.
+- A retried DELETE (`deleteConnection`, or `request("DELETE", ...)`) that gets a `404` resolves to
+  `null`, as a 204 would, when an earlier attempt's answer was lost after the request could have
+  arrived (a read timeout, a connection reset after it opened, a 502 or 504): that attempt may have
+  deleted it. Any other 404 still rejects, including a retry's after a refused connection, a
+  connect timeout, a 429 or a 503.
+
+A call returns or rejects within `totalTimeout` (60 s), retries and their waits included: each
+attempt's timeouts are cut to the time left, and a retry is skipped (the last answer or error
+rejects) when its wait, a `Retry-After` included, would leave under a second. Pass `maxRetries: 0`
+for calls made while a user waits on a page, if 60 s is too long.
+
+`onRetry` is called before each retry's wait with a frozen object: `attempt` (1, 2...),
+`maxRetries`, `delayMs`, `elapsedMs`, `method`, `url` (without its query string), and `status` for
+a retried status or `error` for a network failure or timeout (the other is `null`). It's never
+given the API key, headers or body, and it isn't called when no retry is made. Anything it throws
+stops the call, which rejects with that error:
+
+```js
+const qube = new Client({
+  apiKey: process.env.QUBE_API_KEY,
+  onRetry: ({ attempt, maxRetries, delayMs, method, url, status, error }) =>
+    console.warn(`QuBe Sync retry ${attempt}/${maxRetries} in ${Math.round(delayMs)} ms: ${method} ${url} (${status ?? error.code})`),
+});
+```
 
 ### Errors
 
