@@ -5,7 +5,7 @@
 
 const crypto = require("crypto");
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const SIGNATURE_HEADER = "X-QUBE-Signature";
 const DEFAULT_TOLERANCE = 300;
 const REASONS = Object.freeze(["missing", "malformed", "stale", "mismatch"]);
@@ -387,6 +387,8 @@ function verify(rawBody, header, options) {
   return parse(bytes);
 }
 
+const { Client, APIError } = require("./client");
+
 module.exports = {
   VERSION,
   SIGNATURE_HEADER,
@@ -402,4 +404,6 @@ module.exports = {
   ConnectionEvent,
   NameIndexEvent,
   UnknownEvent,
+  Client,
+  APIError,
 };

@@ -1,7 +1,7 @@
 {
   "name": "qubesync",
-  "version": "0.1.0",
-  "description": "Verify and parse QuBe Sync webhooks (QuickBooks Desktop through qubesync.com).",
+  "version": "0.2.0",
+  "description": "The QuBe Sync v2 API client, and webhook verification and parsing (QuickBooks Desktop through qubesync.com).",
   "license": "MIT",
   "author": "QuBe Sync",
   "homepage": "https://docs.qubesync.com",
@@ -13,6 +13,8 @@
   "keywords": [
     "qubesync",
     "quickbooks",
+    "quickbooks-desktop",
+    "api-client",
     "webhooks",
     "hmac"
   ],
@@ -28,6 +30,7 @@
   },
   "files": [
     "index.js",
+    "client.js",
     "index.mjs",
     "index.d.ts",
     "README.md",
@@ -38,7 +41,7 @@
     "node": ">=16.17"
   },
   "scripts": {
-    "test": "node --test test/webhooks.test.js test/esm.test.mjs",
+    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs",
     "test:types": "npx -y -p typescript@5.6.3 tsc --noEmit --strict --module node16 --moduleResolution node16 --target es2020 test/types.ts"
   }
 }

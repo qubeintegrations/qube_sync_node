@@ -15,6 +15,8 @@ export const {
   ConnectionEvent,
   NameIndexEvent,
   UnknownEvent,
+  Client,
+  APIError,
 } = qubesync;
 
 export default qubesync;

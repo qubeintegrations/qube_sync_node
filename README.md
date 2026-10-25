@@ -1,12 +1,136 @@
 # qubesync (Node)
 
-Verify and parse [QuBe Sync](https://qubesync.com) webhooks: QuickBooks Desktop through
-qubesync.com. Plain JavaScript, zero dependencies, Node 16.17 and later, CommonJS and ESM,
-TypeScript declarations included.
+The [QuBe Sync](https://qubesync.com) v2 API client, and webhook verification and parsing:
+QuickBooks Desktop through qubesync.com. Plain JavaScript, zero dependencies, Node 16.17 and
+later, CommonJS and ESM, TypeScript declarations included. API docs: https://docs.qubesync.com.
 
 ```bash
 npm install qubesync
 ```
+
+## The v2 client
+
+Make one client with your app's API key. The library never reads the environment, so pass the
+key in (and hold a sandbox and a production client at once if you need both):
+
+```js
+const { Client, APIError } = require("qubesync"); // or: import { Client, APIError } from "qubesync";
+
+const qube = new Client({ apiKey: process.env.QUBE_API_KEY });
+```
+
+`new Client({ apiKey, baseUrl = "https://qubesync.com", connectTimeout = 5000, timeout = 30000, maxRetries = 2 })`.
+Timeouts are in milliseconds: `connectTimeout` to open the connection, `timeout` for the socket to
+sit idle waiting for the answer. Every method returns a Promise of the response's `data`, with
+the API's own snake_case keys (`webhook_url`, `total_pages`), or `null` for an empty answer.
+
+### Onboarding a customer
+
+```js
+const connection = await qube.createConnection({ webhookUrl: "https://app.example.com/webhooks/qube", name: "Acme" });
+// Store connection.id, and send your customer to connection.links.onboarding.
+// A connection.connected webhook arrives once their Web Connector checks in.
+
+const fresh = await qube.regenerateOnboarding(connection.id); // a new onboarding link
+```
+
+Also `getConnection(id)`, `listConnections()`, `updateConnection(id, { webhookUrl, name })`,
+`deleteConnection(id)`, and for setup without hosted onboarding `setPassword(id, { password })`
+(leave `password` out to have one generated) and `getQwc(id)` (the QWC file's XML, a string).
+
+### Starting a run and answering its question
+
+```js
+const run = await qube.startRun(connectionId, "customer_sync", { customer: { name: "Acme" } }, {
+  reference: "customer-1042", // your own id for the run, and its Idempotency-Key
+  webhookUrl: "https://app.example.com/webhooks/qube",
+});
+
+// Later, in the workflow_run.awaiting_input webhook (event.prompt), answer by choice:
+await qube.answer(event.prompt.links.decisions, { choice: "use_existing", data: { customer: "80000001-1700000000" } });
+// A question's record field: search QuickBooks with the prompt's search link.
+const matches = await qube.search(event.prompt.links.search, { field: "customer", q: "Acm" });
+```
+
+Also `getRun(runUrl)` (a run's `links.run`) or `getRun(connectionId, runId)`,
+`listRuns(connectionId, { reference, state, outcome })`, `cancelRun(run.links.cancel, { reason })` and
+`runEvents(connectionId, runId, { after, limit })`, which returns the whole body,
+`{ data, next_after }`.
+
+Links (`links.run`, `links.decisions`, `links.search`, `links.cancel`) are used as they come, query
+string included. A link on another origin than the client's `baseUrl` (scheme, host and port) is
+refused with a `TypeError` before any request, so the API key only ever goes to QuBe Sync.
+
+### Queueing an operation
+
+```js
+// POST /connections/{id}/customers; the answer arrives at webhookUrl.
+const queued = await qube.queue(connectionId, "customers", { name: "Acme" }, {
+  webhookUrl: "https://app.example.com/webhooks/qube",
+});
+
+// A query: method "GET" sends the params as the query string.
+await qube.queue(connectionId, "txn-deleteds", { txn_del_type: ["Invoice", "Bill"] }, {
+  webhookUrl: "https://app.example.com/webhooks/qube",
+  method: "GET",
+});
+
+// qbXML as written.
+await qube.queueQbxml(connectionId, requestXml, { webhookUrl: "https://app.example.com/webhooks/qube" });
+```
+
+`operation` is the path after the connection (`"customers"`, `"invoices"`, `"txn-deleteds"`, see the
+[API reference](https://docs.qubesync.com)). `method` is `"POST"` by default, and case-insensitive.
+
+Also `getRequest(connectionId, id)`, `requestPages(connectionId, id)`, `discardRequest(connectionId, id)`,
+and `listRequests(connectionId, { page, pageSize, state, webhookState, sort, sortDirection, searchPhrase })`,
+which returns the whole body, `{ data, meta: { page, total_pages } }`. To walk every page:
+
+```js
+for await (const request of qube.eachRequest(connectionId, { state: "errored" })) {
+  console.log(request.id);
+}
+```
+
+### Anything else
+
+`request(method, pathOrUrl, body, { query, headers })` sends any v2 call, a path under `/api/v2`
+(`"/workflows"`) or a same-origin URL, and returns the parsed body whole.
+
+### Retries and idempotency
+
+A request that's safe to send again (a GET, PUT or DELETE, or one with an `Idempotency-Key`) is
+retried up to `maxRetries` times, 0.5 s then 1 s apart, when the connection fails or times out, or
+QuBe Sync answers 429, 502, 503 or 504 (a 429 or 503's `Retry-After` is honoured, up to 30 s).
+
+- `startRun` sends `reference` as the Idempotency-Key, so a retried start never starts two runs.
+- `queue` and `queueQbxml` take `idempotencyKey`; left out, the client makes a UUID per call and
+  sends it again on that call's retries, so a retry never queues a request twice.
+- The other POSTs (`createConnection`, `answer`, `cancelRun`, `setPassword`, `getQwc`,
+  `regenerateOnboarding`, `discardRequest`) are sent once.
+
+### Errors
+
+Any answer outside 2xx rejects with `APIError`:
+
+```js
+try {
+  await qube.answer(decisionsUrl, { choice: "create" });
+} catch (error) {
+  if (!(error instanceof APIError)) throw error; // Node's own error: the connection failed after the retries
+  error.status;    // 409
+  error.code;      // "prompt_changed", when errors carries a code
+  error.errors;    // the body's errors as parsed: a sentence, { detail, code }, fields, or [{ path, message }]
+  error.message;   // "QuBe Sync answered 409: ...", one line, safe to log
+  error.body;      // the raw body
+  error.requestId; // the x-request-id header, for support
+}
+```
+
+A connection that still fails after the retries rejects with Node's own error (`ECONNREFUSED`,
+`ECONNRESET`, or `ETIMEDOUT` for a timeout), unchanged. Neither ever holds the API key, and
+`util.inspect(client)` and `JSON.stringify(client)` show only the `baseUrl`. See
+[error handling](https://docs.qubesync.com/error_handling).
 
 ## Webhooks
 

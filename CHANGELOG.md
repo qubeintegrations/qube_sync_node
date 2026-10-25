@@ -1,7 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-10-25)
 
+The v2 API client.
+
+- `new Client({ apiKey, baseUrl = "https://qubesync.com", connectTimeout = 5000, timeout = 30000, maxRetries = 2 })`:
+  Basic auth with the key passed in (the environment is never read), and the key never in
+  `util.inspect`, `JSON.stringify` or an error.
+- Connections: `createConnection`, `getConnection`, `listConnections`, `updateConnection`,
+  `deleteConnection`, `regenerateOnboarding`, `setPassword`, `getQwc`.
+- Runs: `startRun` (the `reference` is the Idempotency-Key), `getRun` by link or ids, `listRuns`,
+  `cancelRun`, `runEvents`. Questions: `answer`, `search`.
+- Requests: `queue` (any operation, `method` `"POST"` by default, a generated Idempotency-Key reused
+  on retries), `queueQbxml`, `getRequest`, `requestPages`, `listRequests`, `eachRequest` (an async
+  iterator over every page), `discardRequest`; `request` for anything else.
+- Links are refused unless they're on the client's own origin.
+- Retries for retry-safe requests on a failed connection, a timeout, 429, 502, 503 and 504, with
+  `Retry-After` honoured up to 30 s.
+- `APIError` with `status`, `code`, `message`, `errors`, `body` and `requestId`.
 - Releases publish through npm trusted publishing, from `release.yml`'s OIDC token; no npm
   token is stored.
 
