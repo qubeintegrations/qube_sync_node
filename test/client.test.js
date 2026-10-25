@@ -129,7 +129,7 @@ describe("Client: construction", () => {
 
   it("is exported with the webhook names", () => {
     assert.strictEqual(typeof qubesync.verify, "function");
-    assert.strictEqual(qubesync.VERSION, "0.2.0");
+    assert.strictEqual(qubesync.VERSION, "0.3.0");
   });
 });
 

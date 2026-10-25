@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+The integration kit's foundation, so an Express app keeps only its own code (a config, operation
+classes, a connection class) and updates the rest with `npm update`.
+
+- `qubesync/kit`, framework-free: `configure(settings)` / `settings()` (operations, connection,
+  currentAccount, authorizeQuestion, enqueue, dedupe, apiKey, baseUrl, webhookSecret, webhookUrl;
+  an unset one throws at first use naming the config file, the secrets fall back to the
+  environment and never show in `inspect` or JSON); the `Operation` and `ConnectionEvents` bases
+  (reference, revision and delivery-id checks, questions saved and forgotten, `saveRecord`);
+  `run(job)`; `receiveWebhook`, `startOnboarding`, `answerQuestion` and `searchQuestion`;
+  `renderQuestion` with `escapeHtml` and `SEARCH_SCRIPT`; the mapping helpers (`get`, `rows`,
+  `dig`, `asString`, `asNumber`, `asInteger`, `asDate`, `withoutNils`); `client()`.
+- `qubesync/express`, for Express 4 and 5 (an optional peer dependency): the `webhooks()`,
+  `connect()` and `questions()` routers.
+- Unset, `authorizeQuestion` refuses every answer and search and logs why; `enqueue` runs jobs in
+  the process after the response, and `dedupe` keeps delivery ids in memory, each warning once.
+
 ## 0.2.0 (2026-10-25)
 
 The v2 API client.
