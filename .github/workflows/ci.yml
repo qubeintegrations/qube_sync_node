@@ -17,6 +17,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
+      - name: operations/ matches test/fixtures/operations.json
+        run: node scripts/generate-operations.js --check
       - if: matrix.node == '22'
         run: npm run test:types
       - if: matrix.node == '22'

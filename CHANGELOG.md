@@ -11,8 +11,17 @@ The v2 API client.
   `deleteConnection`, `regenerateOnboarding`, `setPassword`, `getQwc`.
 - Runs: `startRun` (the `reference` is the Idempotency-Key), `getRun` by link or ids, `listRuns`,
   `cancelRun`, `runEvents`. Questions: `answer`, `search`.
-- Requests: `queue` (any operation, `method` `"POST"` by default, a generated Idempotency-Key reused
-  on retries), `queueQbxml`, `getRequest`, `requestPages`, `listRequests`, `eachRequest` (an async
+- Every QuickBooks operation as a method, entity then action: `qube.customer.create(connectionId,
+  params, { webhookUrl, idempotencyKey })`, `qube.customerMsg.query(...)`, `qube.txnVoid.execute(...)`
+  (261 operations on 124 entities). Each entity's module loads on first use, and can be imported
+  alone (`qubesync/operations/<entity>`). Generated from the QuBe Sync operations manifest
+  (`test/fixtures/operations.json`, served at https://qubesync.com/libraries/operations.json) by
+  `node scripts/generate-operations.js`, with full nested param types and every field's description
+  in `operations/*.d.ts`; CI fails when the generated files or the vendored manifest drift.
+- Query params: nested objects go bracketed (`name_range[from]=A`), arrays of scalars as a repeated key.
+- `queue(operationId, connectionId, params, { webhookUrl, idempotencyKey, method, path })` queues by
+  operation id; an id this version doesn't know needs `method` and `path`.
+- Requests: `queueQbxml`, `getRequest`, `requestPages`, `listRequests`, `eachRequest` (an async
   iterator over every page), `discardRequest`; `request` for anything else.
 - Links are refused unless they're on the client's own origin.
 - Retries for retry-safe requests on a failed connection, a timeout, 429, 502, 503 and 504, with

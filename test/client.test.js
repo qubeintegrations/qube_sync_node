@@ -171,8 +171,9 @@ describe("Client: every call", () => {
     await assert.rejects(c.startRun(CONN, "w", {}, { webhookUrl: "https://app.test/h" }), TypeError);
     await assert.rejects(c.answer("/x", {}), TypeError);
     await assert.rejects(c.search("/x", { field: "customer" }), TypeError);
-    await assert.rejects(c.queue(CONN, "customers", {}, {}), TypeError);
-    await assert.rejects(c.queue(CONN, "customers", {}, { webhookUrl: "https://app.test/h", method: "PATCH" }), TypeError);
+    await assert.rejects(c.queue("customer.create", CONN, {}, {}), TypeError);
+    await assert.rejects(c.customer.create(CONN, { name: "A" }, {}), TypeError);
+    await assert.rejects(c.queue("customer.create", CONN, {}, { webhookUrl: "https://app.test/h", method: "PATCH" }), TypeError);
     assert.strictEqual(received.length, 0);
   });
 });
@@ -326,37 +327,68 @@ describe("Client: links", () => {
 });
 
 describe("Client: queued requests", () => {
-  it("queue POSTs the params, webhook_url in the query, a fresh UUID key", async () => {
-    await client().queue(CONN, "/customers", { name: "Acme" }, { webhookUrl: "https://app.test/hooks" });
+  it("a body operation sends JSON, webhook_url in the query and a fresh UUID key", async () => {
+    await client().customer.create(CONN, { name: "Acme", bill_address: { city: "Austin" } }, { webhookUrl: "https://app.test/hooks" });
     const r = last();
-    assert.deepStrictEqual(pick(r), ["POST", `/api/v2/connections/${CONN}/customers`, { name: "Acme" }]);
+    assert.deepStrictEqual(pick(r), ["POST", `/api/v2/connections/${CONN}/customers`, { name: "Acme", bill_address: { city: "Austin" } }]);
     assert.deepStrictEqual(r.query, [["webhook_url", "https://app.test/hooks"]]);
     assert.match(r.headers["idempotency-key"], UUID);
-    await client().queue(CONN, "customers", { name: "Acme" }, { webhookUrl: "https://app.test/hooks" });
+    await client().customer.create(CONN, { name: "Acme" }, { webhookUrl: "https://app.test/hooks" });
     assert.notStrictEqual(last().headers["idempotency-key"], r.headers["idempotency-key"]);
-    await client().queue(CONN, "customers", {}, { webhookUrl: "https://app.test/h", idempotencyKey: "mine-1" });
+    await client().customer.create(CONN, { name: "A" }, { webhookUrl: "https://app.test/h", idempotencyKey: "mine-1" });
     assert.strictEqual(last().headers["idempotency-key"], "mine-1");
   });
 
-  it("queue with get sends the params as the query", async () => {
-    await client().queue(CONN, "txn-deleteds", { txn_del_type: ["Invoice", "Bill"], max_returned: 10 }, {
-      webhookUrl: "https://app.test/hooks",
-      method: "get",
-    });
+  it("a query operation sends its params as the query string, nested ones bracketed", async () => {
+    await client().customer.query(CONN, {
+      list_id: ["80000001-1", "80000002-1"],
+      max_returned: 10,
+      name_range: { from: "A", to: "M" },
+      currency_filter: { full_name: ["US Dollar"] },
+    }, { webhookUrl: "https://app.test/hooks" });
     const r = last();
-    assert.deepStrictEqual(pick(r), ["GET", `/api/v2/connections/${CONN}/txn-deleteds`, undefined]);
+    assert.deepStrictEqual(pick(r), ["GET", `/api/v2/connections/${CONN}/customers`, undefined]);
     assert.deepStrictEqual(r.query, [
       ["webhook_url", "https://app.test/hooks"],
-      ["txn_del_type", "Invoice"],
-      ["txn_del_type", "Bill"],
+      ["list_id", "80000001-1"],
+      ["list_id", "80000002-1"],
       ["max_returned", "10"],
+      ["name_range[from]", "A"],
+      ["name_range[to]", "M"],
+      ["currency_filter[full_name][]", "US Dollar"],
     ]);
+    // customer.query is paged: still one call; the pages come by webhook.
+    assert.strictEqual(received.length, 1);
     await assert.rejects(
-      client().queue(CONN, "customers", { filter: { name: "A" } }, { webhookUrl: "https://app.test/h", method: "GET" }),
+      client().customer.query(CONN, { list_id: [["a"]] }, { webhookUrl: "https://app.test/h" }),
       TypeError
     );
-    await client().queue(CONN, "customers", { list_id: "1" }, { webhookUrl: "https://app.test/h", method: "Put" });
-    assert.deepStrictEqual(pick(last()), ["PUT", `/api/v2/connections/${CONN}/customers`, { list_id: "1" }]);
+  });
+
+  it("queue by id sends what the entity method sends", async () => {
+    const params = { name: "Acme", is_active: true };
+    const options = { webhookUrl: "https://app.test/hooks", idempotencyKey: "k-1" };
+    await client().queue("customer.create", CONN, params, options);
+    await client().customer.create(CONN, params, options);
+    const [a, b] = received;
+    assert.deepStrictEqual([a.method, a.path, a.search, a.text, a.headers["idempotency-key"]], [b.method, b.path, b.search, b.text, b.headers["idempotency-key"]]);
+  });
+
+  it("queue refuses an unknown id without method and path, and sends one with them", async () => {
+    await assert.rejects(client().queue("widget.create", CONN, {}, { webhookUrl: "https://app.test/h" }), (error) => {
+      assert.ok(error instanceof TypeError);
+      assert.match(error.message, /widget\.create/);
+      assert.match(error.message, /method/);
+      assert.match(error.message, /path/);
+      return true;
+    });
+    await assert.rejects(client().queue("widget.create", CONN, {}, { webhookUrl: "https://app.test/h", method: "POST" }), TypeError);
+    assert.strictEqual(received.length, 0);
+    await client().queue("widget.create", CONN, { name: "W" }, { webhookUrl: "https://app.test/h", method: "post", path: "/widgets" });
+    assert.deepStrictEqual(pick(last()), ["POST", `/api/v2/connections/${CONN}/widgets`, { name: "W" }]);
+    await client().queue("widget.query", CONN, { name: "W" }, { webhookUrl: "https://app.test/h", method: "GET", path: "widgets" });
+    assert.deepStrictEqual(pick(last()), ["GET", `/api/v2/connections/${CONN}/widgets`, undefined]);
+    assert.deepStrictEqual(last().query, [["webhook_url", "https://app.test/h"], ["name", "W"]]);
   });
 
   it("queueQbxml", async () => {
@@ -466,7 +498,7 @@ describe("Client: retries", () => {
 
   it("reuses queue's generated key on a retry", async () => {
     answer({ status: 503 }, { status: 201, json: { data: { id: "q1" } } });
-    assert.deepStrictEqual(await client().queue(CONN, "customers", { name: "A" }, { webhookUrl: "https://app.test/h" }), { id: "q1" });
+    assert.deepStrictEqual(await client().customer.create(CONN, { name: "A" }, { webhookUrl: "https://app.test/h" }), { id: "q1" });
     assert.strictEqual(received.length, 2);
     assert.match(received[0].headers["idempotency-key"], UUID);
     assert.strictEqual(received[1].headers["idempotency-key"], received[0].headers["idempotency-key"]);
@@ -727,6 +759,70 @@ describe("Client: a retried DELETE that finds nothing", () => {
   it("leaves other methods' 404s alone", async () => {
     answer({ status: 504 }, notFound);
     await assert.rejects(client().getConnection(CONN), (error) => error.status === 404);
+  });
+});
+
+describe("Client: every generated operation", () => {
+  const { OPERATIONS } = require("../operations/index.js");
+  const manifest = JSON.parse(require("node:fs").readFileSync(require("node:path").join(__dirname, "fixtures", "operations.json"), "utf8"));
+  const camel = (snake) => snake.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+
+  it("covers the manifest", () => {
+    assert.deepStrictEqual(Object.keys(OPERATIONS), manifest.operations.map((op) => op.id).sort());
+  });
+
+  it("sends each through its entity accessor and action", async () => {
+    const c = client();
+    for (const op of manifest.operations) {
+      received = [];
+      const entity = c[camel(op.entity)];
+      assert.strictEqual(typeof entity[op.action], "function", op.id);
+      await entity[op.action](CONN, { probe: "x" }, { webhookUrl: "https://app.test/h" });
+      const r = last();
+      assert.strictEqual(r.method, op.method, op.id);
+      assert.strictEqual(r.path, `/api/v2${op.path.replace("{connection_id}", CONN)}`, op.id);
+      assert.match(r.headers["idempotency-key"], UUID, op.id);
+      if (op.params_in === "body") {
+        assert.deepStrictEqual(r.body, { probe: "x" }, op.id);
+        assert.deepStrictEqual(r.query, [["webhook_url", "https://app.test/h"]], op.id);
+      } else {
+        assert.strictEqual(r.body, undefined, op.id);
+        assert.deepStrictEqual(r.query, [["webhook_url", "https://app.test/h"], ["probe", "x"]], op.id);
+      }
+    }
+  });
+
+  it("escapes the connection id as one segment", async () => {
+    await client().invoice.query("a/b", {}, { webhookUrl: "https://app.test/h" });
+    assert.strictEqual(last().path, "/api/v2/connections/a%2Fb/invoices");
+  });
+
+  it("loads an entity's module on first use only, once per client", () => {
+    const { execFileSync } = require("node:child_process");
+    const script = `
+      const { Client } = require(${JSON.stringify(require.resolve(".."))});
+      const loaded = () => Object.keys(require.cache).filter((k) => /operations[\\/][a-z0-9_]+\\.js$/.test(k) && !/index\\.js$/.test(k)).map((k) => k.split(/[\\/]/).pop()).sort();
+      const c = new Client({ apiKey: "k" });
+      const before = loaded();
+      const a = c.customerMsg;
+      const same = a === c.customerMsg && a !== new Client({ apiKey: "k" }).customerMsg;
+      console.log(JSON.stringify({ before, after: loaded(), same }));
+    `;
+    const out = JSON.parse(execFileSync(process.execPath, ["-e", script], { encoding: "utf8" }));
+    assert.deepStrictEqual(out.before, []);
+    assert.deepStrictEqual(out.after, ["customer_msg.js"]);
+    assert.strictEqual(out.same, true);
+  });
+
+  it("can be imported alone", async () => {
+    const { CustomerMsg } = require("qubesync/operations/customer_msg");
+    await new CustomerMsg(client()).create(CONN, { name: "Net 30" }, { webhookUrl: "https://app.test/h" });
+    assert.deepStrictEqual(pick(last()), ["POST", `/api/v2/connections/${CONN}/customer-msgs`, { name: "Net 30" }]);
+  });
+
+  it("is up to date with the manifest", () => {
+    const { execFileSync } = require("node:child_process");
+    execFileSync(process.execPath, [require("node:path").join(__dirname, "..", "scripts", "generate-operations.js"), "--check"], { encoding: "utf8" });
   });
 });
 

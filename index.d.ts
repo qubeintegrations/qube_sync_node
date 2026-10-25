@@ -246,14 +246,18 @@ export interface SearchOptions {
   q: string;
 }
 
+import type { OperationOptions, QueuedRequest } from "./operations/types";
+import type { ClientOperations } from "./operations/client";
+export type { OperationOptions, QueuedRequest } from "./operations/types";
+export type { ClientOperations } from "./operations/client";
+
 export type QueueMethod = "GET" | "POST" | "PUT" | "DELETE" | "get" | "post" | "put" | "delete";
 
-export interface QueueOptions {
-  webhookUrl: string;
-  /** Default `"POST"`; case-insensitive. GET and DELETE send `params` as the query string. */
+export interface QueueOptions extends OperationOptions {
+  /** Needed, with `path`, for an operation id this version doesn't know; case-insensitive. */
   method?: QueueMethod;
-  /** Default: a fresh UUID per call, reused on that call's retries. */
-  idempotencyKey?: string;
+  /** Relative to the connection (`"customers"`); needed, with `method`, for an id this version doesn't know. */
+  path?: string;
 }
 
 export interface QueueQbxmlOptions {
@@ -288,6 +292,8 @@ export interface RequestOptions {
  * after the retries rejects with Node's own error. A link on another origin than `baseUrl`
  * rejects with a `TypeError` before any request is made.
  */
+/** The entity accessors (`qube.customer`, `qube.customerMsg`...) come from `ClientOperations`. */
+export interface Client extends ClientOperations {}
 export declare class Client {
   constructor(options: ClientOptions);
   readonly baseUrl: string;
@@ -327,8 +333,11 @@ export declare class Client {
   /** Takes the prompt's `links.search`. */
   search(searchUrl: string, options: SearchOptions): Promise<ApiObject[]>;
 
-  /** Queues an operation: `operation` is the path after the connection (`"customers"`, `"txn-deleteds"`). */
-  queue(connectionId: string, operation: string, params: ApiObject | undefined, options: QueueOptions): Promise<ApiObject>;
+  /**
+   * Queues any operation by its id (`"customer.create"`), as `qube.customer.create(...)` does. An id
+   * this version doesn't know (an operation newer than it) needs `method` and `path`.
+   */
+  queue(operationId: string, connectionId: string, params: ApiObject | undefined, options: QueueOptions): Promise<QueuedRequest>;
   queueQbxml(connectionId: string, requestXml: string, options: QueueQbxmlOptions): Promise<ApiObject>;
   getRequest(connectionId: string, id: string): Promise<ApiObject>;
   requestPages(connectionId: string, id: string): Promise<ApiObject[]>;

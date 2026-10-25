@@ -119,20 +119,44 @@ function compact(object) {
   return out;
 }
 
+// Query strings as the v2 API reads them: an array of scalars repeats its bare key
+// (`list_id=a&list_id=b`); a nested object brackets its keys (`name_range[from]=A`), and an array
+// inside one brackets too (`filter[list_id][]=a`), as Plug decodes them.
 function appendQuery(url, query) {
   if (query === undefined || query === null) return;
   if (!isPlainObject(query)) throw new TypeError("query must be an object");
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null) continue;
-    const values = Array.isArray(value) ? value : [value];
-    for (const item of values) {
+  for (const [key, value] of Object.entries(query)) appendValue(url, key, value, true);
+}
+
+function appendValue(url, key, value, top) {
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) {
       if (item === undefined || item === null) continue;
-      if (typeof item === "object") {
-        throw new TypeError(`query parameter ${key} must be a string, number, boolean or an array of them`);
-      }
-      url.searchParams.append(key, String(item));
+      if (Array.isArray(item)) throw new TypeError(`query parameter ${key} can't hold an array of arrays`);
+      if (isPlainObject(item)) appendValue(url, `${key}[]`, item, false);
+      else url.searchParams.append(top ? key : `${key}[]`, scalar(key, item));
     }
+    return;
   }
+  if (isPlainObject(value)) {
+    for (const [sub, inner] of Object.entries(value)) appendValue(url, `${key}[${sub}]`, inner, false);
+    return;
+  }
+  url.searchParams.append(key, scalar(key, value));
+}
+
+function scalar(key, value) {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  throw new TypeError(`query parameter ${key} must be a string, number, boolean, array or plain object`);
+}
+
+let operationIndex = null;
+
+function operations() {
+  if (!operationIndex) operationIndex = require("./operations/index.js");
+  return operationIndex;
 }
 
 function defaultSleep(ms) {
@@ -337,26 +361,35 @@ class Client {
   // -------------------------------------------------------------------------
   // Queued requests
 
-  async queue(connectionId, operation, params, { webhookUrl, method = "POST", idempotencyKey } = {}) {
-    const op = requireString(operation, "operation").replace(/^\/+/, "");
-    if (op === "") throw new TypeError("operation is required (a non-empty string)");
-    if (typeof method !== "string") throw new TypeError("method must be a string");
-    const verb = method.toUpperCase();
+  /**
+   * Queues any operation by its id (`"customer.create"`), as `qube.customer.create(...)` does.
+   * An id this version doesn't know (an operation newer than it) needs `method` and `path`
+   * (relative to the connection: `"customers"`).
+   */
+  async queue(operationId, connectionId, params, { webhookUrl, idempotencyKey, method, path } = {}) {
+    const id = requireString(operationId, "operationId");
+    const known = Object.prototype.hasOwnProperty.call(operations().OPERATIONS, id) ? operations().OPERATIONS[id] : null;
+    if (!known && (typeof method !== "string" || method === "" || typeof path !== "string" || path === "")) {
+      throw new TypeError(
+        `operation ${JSON.stringify(id)} isn't one this version of qubesync knows: pass method and path (relative to the connection, such as "customers")`
+      );
+    }
+    const verb = (typeof method === "string" && method !== "" ? method : known.method).toUpperCase();
     if (!QUEUE_METHODS.has(verb)) throw new TypeError(`method must be GET, POST, PUT or DELETE, not ${method}`);
+    const relative = (typeof path === "string" && path !== "" ? path : known.path).replace(/^\/+/, "");
+    if (relative === "") throw new TypeError("path must name the operation, such as \"customers\"");
+    const paramsIn = known && !method ? known.paramsIn : verb === "GET" ? "query" : "body";
     const values = params === undefined || params === null ? {} : params;
     if (!isPlainObject(values)) throw new TypeError("params must be an object");
     const query = { webhook_url: requireString(webhookUrl, "webhookUrl") };
     let body;
-    if (verb === "GET" || verb === "DELETE") {
-      for (const [key, value] of Object.entries(values)) {
-        if (key === "webhook_url") continue;
-        query[key] = value;
-      }
+    if (paramsIn === "query") {
+      for (const [key, value] of Object.entries(values)) if (key !== "webhook_url") query[key] = value;
     } else {
       body = values;
     }
-    const path = `/connections/${requireId(connectionId, "connectionId")}/${op}`;
-    return this.#data(verb, path, body, { query, headers: { "Idempotency-Key": idempotencyKey || crypto.randomUUID() } });
+    const url = `/connections/${requireId(connectionId, "connectionId")}/${relative}`;
+    return this.#data(verb, url, body, { query, headers: { "Idempotency-Key": idempotencyKey || crypto.randomUUID() } });
   }
 
   async queueQbxml(connectionId, requestXml, { webhookUrl, idempotencyKey } = {}) {
@@ -603,6 +636,25 @@ class Client {
       req.end(payload);
     });
   }
+}
+
+// The entity accessors, `qube.customer` and the rest: each loads its operations/<entity>.js on
+// first use, and keeps one instance per client.
+const entityInstances = new WeakMap();
+for (const [name, load] of Object.entries(operations().ENTITIES)) {
+  Object.defineProperty(Client.prototype, name, {
+    configurable: true,
+    enumerable: false,
+    get() {
+      let mine = entityInstances.get(this);
+      if (!mine) entityInstances.set(this, (mine = Object.create(null)));
+      if (!mine[name]) {
+        const EntityClass = load();
+        mine[name] = new EntityClass(this);
+      }
+      return mine[name];
+    },
+  });
 }
 
 module.exports = { Client, APIError };

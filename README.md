@@ -63,24 +63,51 @@ refused with a `TypeError` before any request, so the API key only ever goes to 
 
 ### Queueing an operation
 
+Every QuickBooks operation is a method, entity then action: `create`, `update`, `query`, `delete` or
+`execute`. Each takes the connection id, the params (the API's own snake_case fields) and
+`{ webhookUrl, idempotencyKey }`, and resolves to the queued request; the answer arrives at
+`webhookUrl`.
+
 ```js
-// POST /connections/{id}/customers; the answer arrives at webhookUrl.
-const queued = await qube.queue(connectionId, "customers", { name: "Acme" }, {
+// POST /connections/{id}/customers
+const queued = await qube.customer.create(connectionId, {
+  name: "Acme",
+  bill_address: { addr1: "1 Main St", city: "Austin", state: "TX", postal_code: "78701" },
+}, { webhookUrl: "https://app.example.com/webhooks/qube" });
+
+// GET /connections/{id}/invoices: a query's params go in the query string.
+await qube.invoice.query(connectionId, {
+  modified_date_range_filter: { from_modified_date: "2026-10-01T00:00:00Z" },
+  include_line_items: true,
+}, { webhookUrl: "https://app.example.com/webhooks/qube" });
+
+await qube.customerMsg.query(connectionId, {}, { webhookUrl: "https://app.example.com/webhooks/qube" });
+await qube.txnVoid.execute(connectionId, { txn_id: "1A2B-1700000000", txn_void_type: "Invoice" }, {
   webhookUrl: "https://app.example.com/webhooks/qube",
 });
-
-// A query: method "GET" sends the params as the query string.
-await qube.queue(connectionId, "txn-deleteds", { txn_del_type: ["Invoice", "Bill"] }, {
-  webhookUrl: "https://app.example.com/webhooks/qube",
-  method: "GET",
-});
-
-// qbXML as written.
-await qube.queueQbxml(connectionId, requestXml, { webhookUrl: "https://app.example.com/webhooks/qube" });
 ```
 
-`operation` is the path after the connection (`"customers"`, `"invoices"`, `"txn-deleteds"`, see the
-[API reference](https://docs.qubesync.com)). `method` is `"POST"` by default, and case-insensitive.
+Each entity's module loads the first time you use it (`qube.customer`), so the 124 of them cost
+nothing until then. A bundled app can import one alone:
+`const { Customer } = require("qubesync/operations/customer"); new Customer(qube).create(...)`.
+
+The types are in `operations/<entity>.d.ts` (and nested ones shared between entities in
+`operations/types.d.ts`): every field with its description, required where QuickBooks requires it,
+enums as literal unions, so an editor completes and checks the params. Each method's doc says whether
+QuickBooks answers in pages (each page comes as its own webhook) and links its
+[API reference](https://docs.qubesync.com) page. They're generated from the QuBe Sync operations
+manifest (`node scripts/generate-operations.js`), not written by hand.
+
+`queue(operationId, connectionId, params, { webhookUrl, idempotencyKey, method, path })` queues an
+operation by its id, the same as the method: `qube.queue("customer.create", connectionId, params, options)`.
+For an operation newer than this version, pass `method` and `path` (relative to the connection):
+`qube.queue("widget.create", connectionId, params, { webhookUrl, method: "POST", path: "widgets" })`.
+
+qbXML as written:
+
+```js
+await qube.queueQbxml(connectionId, requestXml, { webhookUrl: "https://app.example.com/webhooks/qube" });
+```
 
 Also `getRequest(connectionId, id)`, `requestPages(connectionId, id)`, `discardRequest(connectionId, id)`,
 and `listRequests(connectionId, { page, pageSize, state, webhookState, sort, sortDirection, searchPhrase })`,
@@ -104,8 +131,8 @@ retried up to `maxRetries` times, 0.5 s then 1 s apart, when the connection fail
 QuBe Sync answers 429, 502, 503 or 504 (a 429 or 503's `Retry-After` is honoured, up to 30 s).
 
 - `startRun` sends `reference` as the Idempotency-Key, so a retried start never starts two runs.
-- `queue` and `queueQbxml` take `idempotencyKey`; left out, the client makes a UUID per call and
-  sends it again on that call's retries, so a retry never queues a request twice.
+- Every operation method, `queue` and `queueQbxml` take `idempotencyKey`; left out, the client makes
+  a UUID per call and sends it again on that call's retries, so a retry never queues a request twice.
 - `answer` is retried when its link has a `prompt_token` (a run's `links.decisions` always does
   while it asks). A retry after a lost answer may reject with a `409` whose `code` is
   `prompt_changed`: the question has been answered, by the first attempt or by someone else.
@@ -284,10 +311,14 @@ app.post("/webhooks/qube", express.raw({ type: "application/json" }), (req, res)
 ```sh
 npm test            # node:test, no dependencies
 npm run test:types  # tsc --strict against test/types.ts (fetches TypeScript with npx)
+node scripts/generate-operations.js          # regenerate operations/ from test/fixtures/operations.json
+node scripts/generate-operations.js --check  # fail when operations/ is stale
 ```
 
-`test/fixtures/test_vectors.json` comes from the QuBe Sync server (`mix webhook_vectors.gen`).
-Copy a new version in; don't edit it.
+`test/fixtures/test_vectors.json` comes from the QuBe Sync server (`mix webhook_vectors.gen`), and
+`test/fixtures/operations.json` from https://qubesync.com/libraries/operations.json
+(`mix library_operations.gen`). Copy a new version in, then regenerate; don't edit either, or
+anything in `operations/`.
 
 ## License
 

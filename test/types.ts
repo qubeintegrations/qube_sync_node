@@ -13,7 +13,10 @@ import {
   RequestsPage,
   RunEventsPage,
   RetryInfo,
+  QueuedRequest,
 } from "qubesync";
+import type { CustomerCreateParams } from "qubesync/operations/customer";
+import { CustomerMsg } from "qubesync/operations/customer_msg";
 
 declare const rawBody: Uint8Array;
 declare const header: string | undefined;
@@ -108,8 +111,43 @@ async function useClient(): Promise<void> {
   const matches: ApiObject[] = await client.search(run.prompt.links.search, { field: "customer", q: "Ac" });
   void matches;
 
-  await client.queue("c", "customers", { name: "Acme" }, { webhookUrl: "https://app.test/h" });
-  await client.queue("c", "txn-deleteds", { txn_del_type: "Invoice" }, { webhookUrl: "https://app.test/h", method: "get", idempotencyKey: "k" });
+  await client.queue("customer.create", "c", { name: "Acme" }, { webhookUrl: "https://app.test/h" });
+  await client.queue("widget.query", "c", { name: "W" }, { webhookUrl: "https://app.test/h", method: "get", path: "widgets", idempotencyKey: "k" });
+
+  // Generated operations, with nested params.
+  const queued: QueuedRequest = await client.customer.create(
+    "c",
+    { name: "Acme", bill_address: { addr1: "1 Main St", city: "Austin", postal_code: "78701" }, is_active: true },
+    { webhookUrl: "https://app.test/h", idempotencyKey: "k" }
+  );
+  void queued;
+  await client.customerMsg.query("c", { active_status: "All", name_range_filter: { from_name: "A" } }, { webhookUrl: "https://app.test/h" });
+  await client.customerMsg.query("c", undefined, { webhookUrl: "https://app.test/h" });
+  const createParams: CustomerCreateParams = { name: "Acme" };
+  await client.customer.create("c", createParams, { webhookUrl: "https://app.test/h" });
+  // @ts-expect-error: a misspelled field
+  await client.customer.create("c", { name: "Acme", bill_adress: { city: "Austin" } }, { webhookUrl: "https://app.test/h" });
+  // @ts-expect-error: a misspelled nested field
+  await client.customer.create("c", { name: "Acme", bill_address: { citty: "Austin" } }, { webhookUrl: "https://app.test/h" });
+  // @ts-expect-error: name is required
+  await client.customer.create("c", { is_active: true }, { webhookUrl: "https://app.test/h" });
+  // @ts-expect-error: not one of the enum's values
+  await client.customerMsg.query("c", { active_status: "Sometimes" }, { webhookUrl: "https://app.test/h" });
+  // @ts-expect-error: webhookUrl is required
+  await client.customer.create("c", { name: "Acme" }, {});
+  // The README's examples.
+  await client.customer.create("c", {
+    name: "Acme",
+    bill_address: { addr1: "1 Main St", city: "Austin", state: "TX", postal_code: "78701" },
+  }, { webhookUrl: "https://app.test/h" });
+  await client.invoice.query("c", {
+    modified_date_range_filter: { from_modified_date: "2026-10-01T00:00:00Z" },
+    include_line_items: true,
+  }, { webhookUrl: "https://app.test/h" });
+  await client.customerMsg.query("c", {}, { webhookUrl: "https://app.test/h" });
+  await client.txnVoid.execute("c", { txn_id: "1A2B-1700000000", txn_void_type: "Invoice" }, { webhookUrl: "https://app.test/h" });
+  const alone: CustomerMsg = new CustomerMsg(client);
+  await alone.create("c", { name: "Net 30" }, { webhookUrl: "https://app.test/h" });
   await client.queueQbxml("c", "<QBXML/>", { webhookUrl: "https://app.test/h" });
   await client.getRequest("c", "q");
   await client.requestPages("c", "q");
