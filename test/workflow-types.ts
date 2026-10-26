@@ -2,7 +2,8 @@
 // the module `npx qubesync workflows` writes (the golden one, from the sample document), and a
 // qubesync/kit operation whose input is one of its types.
 import { Client, NOT_MODIFIED } from "qubesync";
-import { Operation } from "qubesync/kit";
+import { Operation, withoutNils, get, asString, asDate } from "qubesync/kit";
+import type { WithoutNils } from "qubesync/kit";
 import { render, check, cli, header } from "qubesync/workflow-types";
 import {
   addTransaction,
@@ -82,6 +83,42 @@ class CreateInvoice extends Operation<Invoice> {
   }
 }
 void CreateInvoice;
+
+// A mapped input, as the kit writes one: refs and fields your record may not have yet are
+// nullable, and withoutNils leaves them out, so they're optional in its type.
+type Ref = { list_id: string } | { full_name: string } | null;
+declare const ref: Ref;
+declare const nullableRef: Ref;
+declare const record: any;
+
+class MappedInvoice extends Operation<Invoice> {
+  static workflow = addTransaction.WORKFLOW;
+  static slug = "mapped_invoice";
+
+  async input(): Promise<AddTransactionInvoiceInput> {
+    return this.withoutNils({
+      operation: "invoice.create",
+      params: {
+        customer_ref: ref ?? { full_name: "Walk-in" },
+        class_ref: nullableRef,
+        template_ref: undefined,
+        po_number: get(record, "contract", "po_number"),
+        ref_number: asString(record.id),
+        txn_date: asDate(get(record, "contract", "approved_at")),
+        invoice_line_add: [null, { item_ref: nullableRef, amount: 100, desc: null }],
+      },
+    });
+  }
+}
+void MappedInvoice;
+
+const mapped = withoutNils({ a: "x", b: null as string | null, list: [1, null, 2], when: new Date(), nested: { c: undefined as number | undefined } });
+const mappedType: { a: string; b?: string; list: number[]; when: Date; nested: { c?: number } } = mapped;
+const anything: WithoutNils<any> = 1;
+void [mappedType, anything];
+// @ts-expect-error a nullable ref withoutNils drops leaves a required field (customer_ref) maybe missing
+const missingCustomer: AddTransactionInvoiceInput = withoutNils({ operation: "invoice.create" as const, params: { customer_ref: nullableRef } });
+void missingCustomer;
 
 // The renderer and the CLI, as a script would call them.
 async function generate(): Promise<void> {

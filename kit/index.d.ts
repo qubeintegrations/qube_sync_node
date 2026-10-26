@@ -506,7 +506,8 @@ export declare class Operation<R extends QubeRecord = QubeRecord> {
   linkReferences(event: WorkflowRunEvent | { output?: unknown }, recordFor: (path: string, entry: QubeReference) => Awaitable<QubeRecord | null | undefined>): Promise<QuickbooksRecordRow[]>;
   /** Forgets the question once answered, unless the run has asked another since. */
   answered(token: string): Promise<void>;
-  withoutNils<T>(value: T): T;
+  /** The value without its null and undefined values, at every depth: typed as WithoutNils<T>. */
+  withoutNils<T>(value: T): WithoutNils<T>;
   logEvent(event: QubeEvent): void;
 }
 
@@ -626,4 +627,26 @@ export declare function asString(value: any): string | undefined;
 export declare function asNumber(value: any): number | undefined;
 export declare function asInteger(value: any): number | undefined;
 export declare function asDate(value: any): string | undefined;
-export declare function withoutNils<T>(value: T): T;
+/**
+ * What withoutNils returns for a T: at every depth, a property whose type includes null or undefined
+ * becomes optional without them (withoutNils leaves it out when it is one), an array's elements
+ * lose null and undefined (they're dropped), and anything else (a Date, a string) is as it was.
+ */
+export type WithoutNils<T> = 0 extends 1 & T
+  ? any
+  : T extends readonly (infer E)[]
+    ? WithoutNils<Exclude<E, null | undefined>>[]
+    : T extends Date | ((...args: any[]) => any)
+      ? T
+      : T extends object
+        ? Flat<
+            { [K in keyof T as MaybeNil<T[K]> extends true ? never : K]: WithoutNils<T[K]> } & {
+              [K in keyof T as MaybeNil<T[K]> extends true ? K : never]?: WithoutNils<Exclude<T[K], null | undefined>>;
+            }
+          >
+        : T;
+/** true when T's type includes null or undefined (any included). */
+type MaybeNil<T> = null extends T ? true : undefined extends T ? true : false;
+type Flat<T> = { [K in keyof T]: T[K] };
+/** The value without its null and undefined values, at every depth: what a mapped input sends. */
+export declare function withoutNils<T>(value: T): WithoutNils<T>;

@@ -58,7 +58,9 @@ QuickBooks ids live in the kit's own tables, and the app's tables need no QuBe c
   `client.workflowTypes({ includeDrafts, etag })` fetches the document (`GET /workflows/types`),
   resolving to `NOT_MODIFIED` on a 304; `operations/index.js` carries `DIGEST`, the operations
   manifest's sha256, to compare with the served `operations_digest`. The kit's `Operation#input`
-  may return a generated builder's input.
+  may return a generated builder's input, and `withoutNils` (the function and the method) is typed
+  as what it returns, `WithoutNils<T>`: at every depth a property that may be null or undefined is
+  optional without them, and an array's elements lose them.
 - **`qubesync/express`**, for Express 4 and 5 (an optional peer dependency): `webhooks()`
   (`POST webhooks/qube/runs/:id`, `POST webhooks/qube/connections/:id`), `connect()`
   (`POST quickbooks/connections`, `POST quickbooks/connections/:id/onboarding`) and `questions()`
