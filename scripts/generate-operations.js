@@ -31,7 +31,7 @@ const CLIENT_MEMBERS = new Set([
   "createConnection", "getConnection", "listConnections", "updateConnection", "deleteConnection",
   "regenerateOnboarding", "setPassword", "getQwc", "startRun", "getRun", "listRuns", "cancelRun",
   "runEvents", "answer", "search", "queue", "queueQbxml", "getRequest", "requestPages", "listRequests",
-  "eachRequest", "discardRequest", "request",
+  "eachRequest", "discardRequest", "request", "workflowTypes",
 ]);
 const ACTION_VERBS = { create: "Creates", update: "Updates", query: "Queries", delete: "Deletes", execute: "Runs" };
 

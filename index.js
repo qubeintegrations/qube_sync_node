@@ -387,7 +387,7 @@ function verify(rawBody, header, options) {
   return parse(bytes);
 }
 
-const { Client, APIError } = require("./client");
+const { Client, APIError, NOT_MODIFIED } = require("./client");
 
 module.exports = {
   VERSION,
@@ -406,4 +406,5 @@ module.exports = {
   UnknownEvent,
   Client,
   APIError,
+  NOT_MODIFIED,
 };

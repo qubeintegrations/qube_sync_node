@@ -14,6 +14,8 @@ import {
   RunEventsPage,
   RetryInfo,
   QueuedRequest,
+  NOT_MODIFIED,
+  WorkflowTypesDocument,
 } from "qubesync";
 import type { CustomerCreateParams } from "qubesync/operations/customer";
 import { CustomerMsg } from "qubesync/operations/customer_msg";
@@ -106,6 +108,15 @@ async function useClient(): Promise<void> {
   await client.cancelRun(run.links.cancel);
   const events: RunEventsPage = await client.runEvents("c", "r", { after: "7.3", limit: 50 });
   void events.next_after;
+
+  const types = await client.workflowTypes({ includeDrafts: true, etag: "sha256:aa" });
+  if (types !== NOT_MODIFIED) {
+    const doc: WorkflowTypesDocument = types;
+    const version: number | null = doc.workflows.add_transaction.version;
+    void version;
+  }
+  // @ts-expect-error includeDrafts is a boolean
+  await client.workflowTypes({ includeDrafts: "yes" });
 
   await client.answer(run.prompt.links.decisions, { choice: "use_existing", data: { customer: "1" } });
   const matches: ApiObject[] = await client.search(run.prompt.links.search, { field: "customer", q: "Ac" });

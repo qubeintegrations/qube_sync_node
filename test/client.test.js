@@ -277,6 +277,34 @@ describe("Client: runs", () => {
   });
 });
 
+describe("Client: workflow types", () => {
+  const doc = { digest: "sha256:aa", operations_digest: "sha256:bb", include_drafts: false, workflows: {} };
+
+  it("workflowTypes gets the document, with drafts on request", async () => {
+    answer({ json: { data: doc }, headers: { etag: '"sha256:aa"' } });
+    assert.deepStrictEqual(await client().workflowTypes(), doc);
+    assert.deepStrictEqual(pick(last()), ["GET", "/api/v2/workflows/types", undefined]);
+    assert.strictEqual(last().search, "");
+    assert.strictEqual(last().headers["if-none-match"], undefined);
+    await client().workflowTypes({ includeDrafts: true });
+    assert.deepStrictEqual(last().query, [["include", "drafts"]]);
+  });
+
+  it("sends etag as If-None-Match, quoting a digest, and resolves to NOT_MODIFIED on a 304", async () => {
+    answer({ status: 304 });
+    assert.strictEqual(await client().workflowTypes({ etag: "sha256:aa" }), qubesync.NOT_MODIFIED);
+    assert.strictEqual(last().headers["if-none-match"], '"sha256:aa"');
+    await client().workflowTypes({ etag: 'W/"x"', includeDrafts: true });
+    assert.strictEqual(last().headers["if-none-match"], 'W/"x"');
+    assert.strictEqual(typeof qubesync.NOT_MODIFIED, "symbol");
+  });
+
+  it("rejects any other answer outside 2xx", async () => {
+    answer({ status: 401, json: { errors: "invalid API key" } });
+    await assert.rejects(client().workflowTypes({ etag: "sha256:aa" }), (error) => error instanceof APIError && error.status === 401);
+  });
+});
+
 describe("Client: questions", () => {
   const decisions = () => `${base}/api/v2/connections/${CONN}/workflow-runs/${RUN}/decisions?prompt_token=pt_1`;
   const searchUrl = () => `${base}/api/v2/connections/${CONN}/workflow-runs/${RUN}/search?prompt_token=pt_1`;

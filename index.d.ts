@@ -281,6 +281,42 @@ export interface RequestsPage {
   [key: string]: any;
 }
 
+/** One workflow of a workflow types document. */
+export interface WorkflowTypesEntry {
+  name: string;
+  description: string;
+  /** Its published version, or null for a draft. */
+  version: number | null;
+  draft: boolean;
+  /** The workflow's input, as JSON Schema; an operation's body is `{ "$operation": "<id>" }`. */
+  input: ApiObject;
+  [key: string]: any;
+}
+
+/** What `GET /api/v2/workflows/types` answers: the input types of the app's workflows. */
+export interface WorkflowTypesDocument {
+  /** Covers the rest of the document: what `npx qubesync workflows --check` compares. */
+  digest: string;
+  /** The digest of the operations manifest the `$operation` ids refer to. */
+  operations_digest: string;
+  include_drafts: boolean;
+  /** Each published workflow, at its published version, by key. */
+  workflows: { [key: string]: WorkflowTypesEntry };
+  /** With `includeDrafts`: each workflow whose working copy differs from its published version. */
+  drafts?: { [key: string]: WorkflowTypesEntry };
+  [key: string]: any;
+}
+
+export interface WorkflowTypesOptions {
+  /** Add each workflow's draft (`?include=drafts`). Default false. */
+  includeDrafts?: boolean;
+  /** A document's `digest` (or its ETag), sent as If-None-Match. */
+  etag?: string | null;
+}
+
+/** What `workflowTypes` resolves to on a 304: the document is still the one `etag` names. */
+export declare const NOT_MODIFIED: unique symbol;
+
 export interface RequestOptions {
   query?: Query;
   headers?: { [name: string]: string | number | undefined };
@@ -324,6 +360,12 @@ export declare class Client {
   cancelRun(cancelUrl: string, options?: { reason?: string }): Promise<ApiObject>;
   /** The whole body, `{ data, next_after }`. */
   runEvents(connectionId: string, runId: string, options?: RunEventsOptions): Promise<RunEventsPage>;
+
+  /**
+   * The input types of the app's workflows (`GET /workflows/types`), which `npx qubesync workflows`
+   * renders. With `etag`, resolves to NOT_MODIFIED when the document is still that one.
+   */
+  workflowTypes(options?: WorkflowTypesOptions): Promise<WorkflowTypesDocument | typeof NOT_MODIFIED>;
 
   /**
    * Takes the prompt's `links.decisions`. Retried when the link has a `prompt_token`; a retry after

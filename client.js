@@ -33,6 +33,8 @@ const MIN_TIME_LEFT_MS = 1000;
 const MAY_HAVE_ARRIVED_STATUSES = new Set([502, 504]);
 // Network errors raised after the connection opened: the request may have arrived.
 const mayHaveArrived = new WeakSet();
+// What workflowTypes resolves to on a 304: the document is still the one its etag names.
+const NOT_MODIFIED = Symbol("qubesync.notModified");
 
 function userAgent() {
   // Required lazily: index.js requires this file, and owns VERSION.
@@ -86,6 +88,12 @@ function describe(errors, body, status) {
   const raw = oneLine(body);
   if (raw !== "") return raw.slice(0, MESSAGE_BODY_LIMIT);
   return http.STATUS_CODES[status] || "no body";
+}
+
+// An If-None-Match value: a digest is quoted; an ETag as it came (quoted, or weak) is sent as it is.
+function entityTag(value) {
+  const text = String(value);
+  return text.startsWith('"') || text.startsWith("W/") ? text : `"${text}"`;
 }
 
 function requireString(value, name) {
@@ -339,6 +347,31 @@ class Client {
   async runEvents(connectionId, runId, { after, limit } = {}) {
     const path = `/connections/${requireId(connectionId, "connectionId")}/workflow-runs/${requireId(runId, "runId")}/events`;
     return this.request("GET", path, undefined, { query: { after, limit } });
+  }
+
+  // -------------------------------------------------------------------------
+  // Workflow types
+
+  /**
+   * The input types of the app's workflows, which `npx qubesync workflows` renders into a typed
+   * module (qubesync/workflow-types). Resolves to the document (the response's data): `digest`,
+   * `operations_digest`, `include_drafts`, `workflows` (each published workflow at its published
+   * version) and, with `includeDrafts: true`, `drafts` (each workflow whose working copy differs
+   * from it). With `etag` (a document's `digest`, or the ETag it came with), resolves to
+   * NOT_MODIFIED when the document is still that one.
+   */
+  async workflowTypes({ includeDrafts = false, etag } = {}) {
+    const headers = {};
+    if (etag !== undefined && etag !== null && etag !== "") headers["If-None-Match"] = entityTag(etag);
+    try {
+      return await this.#data("GET", "/workflows/types", undefined, {
+        query: { include: includeDrafts ? "drafts" : undefined },
+        headers,
+      });
+    } catch (error) {
+      if (error instanceof APIError && error.status === 304) return NOT_MODIFIED;
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -657,4 +690,4 @@ for (const [name, load] of Object.entries(operations().ENTITIES)) {
   });
 }
 
-module.exports = { Client, APIError };
+module.exports = { Client, APIError, NOT_MODIFIED };
