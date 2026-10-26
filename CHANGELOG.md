@@ -2,6 +2,14 @@
 
 ## 0.3.0 (unreleased)
 
+From the qube_rails walkthrough and the owner's review (2026-10-26):
+
+- **`Client#createConnection({ webhookUrl, name, type })`**: `type: "simulated"` makes a connection to
+  a simulated QuickBooks company file, connected as it's made.
+- **`Client#redeliverRun(connectionId, runId)`**: `POST .../workflow-runs/{id}/redeliver`, which has
+  QuBe Sync send the run's latest event again; resolves to `{ run_id, event, revision, webhook_url }`
+  (409 nothing to send yet, 429 asked too soon).
+
 The integration kit's foundation, so an Express app keeps only its own code (a config, a store,
 operation classes, a connection events class) and updates the rest with `npm update`. The same
 design as the qube_rails engine: connections are records (an account can have several), runs and

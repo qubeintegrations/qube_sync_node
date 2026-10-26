@@ -36,6 +36,10 @@ const connection = await qube.createConnection({ webhookUrl: "https://app.exampl
 const fresh = await qube.regenerateOnboarding(connection.id); // a new onboarding link
 ```
 
+`createConnection({ webhookUrl, type: "simulated" })` makes a connection to a simulated
+QuickBooks company file instead, connected as it's made (`connection.connected` comes at once), for
+testing without a Windows computer.
+
 Also `getConnection(id)`, `listConnections()`, `updateConnection(id, { webhookUrl, name })`,
 `deleteConnection(id)`, and for setup without hosted onboarding `setPassword(id, { password })`
 (leave `password` out to have one generated) and `getQwc(id)` (the QWC file's XML, a string).
@@ -55,9 +59,15 @@ const matches = await qube.search(event.prompt.links.search, { field: "customer"
 ```
 
 Also `getRun(runUrl)` (a run's `links.run`) or `getRun(connectionId, runId)`,
-`listRuns(connectionId, { reference, state, outcome })`, `cancelRun(run.links.cancel, { reason })` and
-`runEvents(connectionId, runId, { after, limit })`, which returns the whole body,
-`{ data, next_after }`.
+`listRuns(connectionId, { reference, state, outcome })`, `cancelRun(run.links.cancel, { reason })`,
+`redeliverRun(connectionId, runId)` and `runEvents(connectionId, runId, { after, limit })`, which
+returns the whole body, `{ data, next_after }`.
+
+`redeliverRun` has QuBe Sync send the run's latest event again (its ending, or the question it's
+waiting on) to the run's webhook URL, signed, with the revision it carries: for an app that missed
+it, or was down for longer than the webhook retries. It resolves to `{ run_id, event, revision,
+webhook_url }`; a run with nothing to send yet answers 409 (`APIError`, code
+`nothing_to_redeliver`), and one asked again too soon 429.
 
 Links (`links.run`, `links.decisions`, `links.search`, `links.cancel`) are used as they come, query
 string included. A link on another origin than the client's `baseUrl` (scheme, host and port) is

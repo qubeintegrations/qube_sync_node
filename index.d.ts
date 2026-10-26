@@ -210,6 +210,21 @@ export interface ConnectionOptions {
   name?: string;
 }
 
+export interface CreateConnectionOptions extends ConnectionOptions {
+  webhookUrl: string;
+  /** "simulated": a simulated QuickBooks company file, connected as it's made. */
+  type?: "simulated" | (string & {});
+}
+
+/** What `redeliverRun` resolves to. */
+export interface Redelivery {
+  run_id: string;
+  event: string;
+  revision: number;
+  webhook_url: string;
+  [key: string]: any;
+}
+
 export interface StartRunOptions {
   /** Your own id for the run; also sent as the Idempotency-Key. */
   reference: string;
@@ -339,7 +354,7 @@ export declare class Client {
   readonly totalTimeout: number;
   toJSON(): { baseUrl: string };
 
-  createConnection(options: ConnectionOptions & { webhookUrl: string }): Promise<ApiObject>;
+  createConnection(options: CreateConnectionOptions): Promise<ApiObject>;
   getConnection(id: string): Promise<ApiObject>;
   listConnections(): Promise<ApiObject[]>;
   updateConnection(id: string, options: ConnectionOptions): Promise<ApiObject>;
@@ -358,6 +373,8 @@ export declare class Client {
   listRuns(connectionId: string, filters?: ListRunsFilters): Promise<ApiObject[]>;
   /** Takes the run's `links.cancel`. */
   cancelRun(cancelUrl: string, options?: { reason?: string }): Promise<ApiObject>;
+  /** The run's latest event sent again. 409: nothing to send yet; 429: asked again too soon. */
+  redeliverRun(connectionId: string, runId: string): Promise<Redelivery>;
   /** The whole body, `{ data, next_after }`. */
   runEvents(connectionId: string, runId: string, options?: RunEventsOptions): Promise<RunEventsPage>;
 

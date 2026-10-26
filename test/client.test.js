@@ -184,6 +184,8 @@ describe("Client: connections", () => {
     assert.deepStrictEqual(pick(last()), ["POST", "/api/v2/connections", { webhook_url: "https://app.test/hooks", name: "Acme" }]);
     await client().createConnection({ webhookUrl: "https://app.test/hooks" });
     assert.deepStrictEqual(last().body, { webhook_url: "https://app.test/hooks" });
+    await client().createConnection({ webhookUrl: "https://app.test/hooks", type: "simulated" });
+    assert.deepStrictEqual(last().body, { webhook_url: "https://app.test/hooks", type: "simulated" });
   });
 
   it("getConnection, listConnections, deleteConnection", async () => {
@@ -267,6 +269,22 @@ describe("Client: runs", () => {
     assert.deepStrictEqual(pick(last()), ["POST", `/api/v2/connections/${CONN}/workflow-runs/${RUN}/cancel`, { reason: "customer asked" }]);
     await client().cancelRun(link);
     assert.deepStrictEqual(last().body, {});
+  });
+
+  it("redeliverRun posts to the run's redeliver path and unwraps data", async () => {
+    const data = { run_id: RUN, event: "workflow_run.awaiting_input", revision: 4, webhook_url: "https://app.test/h" };
+    answer({ json: { data } });
+    assert.deepStrictEqual(await client().redeliverRun(CONN, RUN), data);
+    assert.deepStrictEqual(pick(last()), ["POST", `/api/v2/connections/${CONN}/workflow-runs/${RUN}/redeliver`, undefined]);
+  });
+
+  it("redeliverRun rejects a 409 or a 429 as an APIError, sent once", async () => {
+    answer({ status: 409, json: { errors: { code: "nothing_to_redeliver", detail: "Nothing yet" } } });
+    await assert.rejects(client().redeliverRun(CONN, RUN), (e) => e instanceof qubesync.APIError && e.status === 409 && e.code === "nothing_to_redeliver");
+    const before = received.length;
+    answer({ status: 429, json: { errors: { detail: "Too soon" } } });
+    await assert.rejects(client({ maxRetries: 0 }).redeliverRun(CONN, RUN), (e) => e.status === 429);
+    assert.strictEqual(received.length, before + 1);
   });
 
   it("runEvents returns the whole body", async () => {

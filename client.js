@@ -278,8 +278,10 @@ class Client {
   // -------------------------------------------------------------------------
   // Connections
 
-  async createConnection({ webhookUrl, name } = {}) {
-    return this.#data("POST", "/connections", compact({ webhook_url: requireString(webhookUrl, "webhookUrl"), name }));
+  // type: "simulated" connects a simulated company file at once, for testing.
+  async createConnection({ webhookUrl, name, type } = {}) {
+    const body = compact({ webhook_url: requireString(webhookUrl, "webhookUrl"), name, type });
+    return this.#data("POST", "/connections", body);
   }
 
   async getConnection(id) {
@@ -341,6 +343,15 @@ class Client {
 
   async cancelRun(cancelUrl, { reason } = {}) {
     return this.#data("POST", requireString(cancelUrl, "cancelUrl"), compact({ reason }));
+  }
+
+  /**
+   * Has QuBe Sync send the run's latest event again. Resolves to `{ run_id, event, revision,
+   * webhook_url }`; 409 when there's nothing to send yet, 429 when asked again too soon.
+   */
+  async redeliverRun(connectionId, runId) {
+    const path = `/connections/${requireId(connectionId, "connectionId")}/workflow-runs/${requireId(runId, "runId")}/redeliver`;
+    return this.#data("POST", path);
   }
 
   /** The whole body: `{ data: [...events], next_after }`. */

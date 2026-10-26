@@ -12,6 +12,7 @@ import {
   ClientOptions,
   RequestsPage,
   RunEventsPage,
+  Redelivery,
   RetryInfo,
   QueuedRequest,
   NOT_MODIFIED,
@@ -88,6 +89,7 @@ async function useClient(): Promise<void> {
   const connection: ApiObject = await client.createConnection({ webhookUrl: "https://app.test/hooks", name: "Acme" });
   const onboarding: string = connection["links"]["onboarding"];
   void onboarding;
+  await client.createConnection({ webhookUrl: "https://app.test/hooks", type: "simulated" });
   await client.getConnection("c");
   const connections: ApiObject[] = await client.listConnections();
   void connections;
@@ -106,6 +108,9 @@ async function useClient(): Promise<void> {
   await client.listRuns("c", { reference: "order-1", state: "awaiting_input", outcome: "succeeded" });
   await client.cancelRun(run.links.cancel, { reason: "asked" });
   await client.cancelRun(run.links.cancel);
+  const redelivery: Redelivery = await client.redeliverRun("c", "r");
+  const redeliveredRevision: number = redelivery.revision;
+  void redeliveredRevision;
   const events: RunEventsPage = await client.runEvents("c", "r", { after: "7.3", limit: 50 });
   void events.next_after;
 
