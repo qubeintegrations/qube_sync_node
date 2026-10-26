@@ -18,7 +18,9 @@ const { client, isNoAnswer } = require("./client");
 const { Run } = require("./records");
 const { settings } = require("./settings");
 
-const QUESTION_CHANGED = "This question has changed; reload.";
+const QUESTION_CHANGED =
+  "This question changed since the page showed it, so that answer was not sent: " +
+  "the page now shows where it stands.";
 const NOT_STARTING = "This run isn't waiting for its start to be confirmed.";
 const NOT_QUIET = "QuBe Sync has been heard from about this run lately: nothing to ask for.";
 const REDELIVERY_REFUSED = Object.freeze({
