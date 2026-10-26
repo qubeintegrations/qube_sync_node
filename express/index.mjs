@@ -1,5 +1,5 @@
 import adapter from "./index.js";
 
-export const { webhooks, connect, questions, DEFAULT_WEBHOOK_LIMIT } = adapter;
+export const { webhooks, connect, questions } = adapter;
 
 export default adapter;
