@@ -1,6 +1,10 @@
 // Generated from operations.json by scripts/generate-operations.js: don't edit.
 "use strict";
 
+// The digest of the operations.json these were generated from. A workflow types document names
+// the one its `$operation` ids refer to (`operations_digest`).
+const DIGEST = "sha256:27dfcdae7dfd1d566328e676abfb92126f24a90719c8eb8c8defd74b031aa4fa";
+
 // Every operation by id: how queue() and the entity methods send it.
 const OPERATIONS = Object.freeze({
   "account.create": Object.freeze({ entity: "account", action: "create", method: "POST", path: "accounts", paramsIn: "body", paged: false }),
@@ -394,4 +398,4 @@ const ENTITIES = Object.freeze({
   workersCompCode: () => require("./workers_comp_code.js").WorkersCompCode,
 });
 
-module.exports = { OPERATIONS, ENTITIES };
+module.exports = { DIGEST, OPERATIONS, ENTITIES };

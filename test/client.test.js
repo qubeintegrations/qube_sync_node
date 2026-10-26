@@ -771,6 +771,12 @@ describe("Client: every generated operation", () => {
     assert.deepStrictEqual(Object.keys(OPERATIONS), manifest.operations.map((op) => op.id).sort());
   });
 
+  it("carries the manifest's digest, as QuBe Sync names it in operations_digest", () => {
+    const bytes = require("node:fs").readFileSync(require("node:path").join(__dirname, "fixtures", "operations.json"));
+    const hex = require("node:crypto").createHash("sha256").update(bytes).digest("hex");
+    assert.strictEqual(require("../operations/index.js").DIGEST, `sha256:${hex}`);
+  });
+
   it("sends each through its entity accessor and action", async () => {
     const c = client();
     for (const op of manifest.operations) {

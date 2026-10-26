@@ -4,7 +4,8 @@
 // Generates operations/ from test/fixtures/operations.json, the QuickBooks
 // operations manifest qubesync.com serves at /libraries/operations.json:
 //
-//   operations/index.js        id -> method, path, params placement, paged, entity; the entity loaders
+//   operations/index.js        id -> method, path, params placement, paged, entity; the entity loaders;
+//                              DIGEST, the manifest's sha256
 //   operations/<entity>.js     one class per entity, a method per action
 //   operations/<entity>.d.ts   its params' types, with every field's description
 //   operations/types.d.ts      nested types more than one entity uses, and the method options
@@ -15,6 +16,7 @@
 //
 // The output is a pure function of the manifest: a re-run writes the same bytes.
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -285,7 +287,13 @@ function facts_(schema) {
 // ---------------------------------------------------------------------------
 // The files
 
-function generate(manifest) {
+// The manifest's digest as QuBe Sync gives it (`operations_digest` in GET /workflows/types): of its
+// bytes, as served.
+function digestOf(bytes) {
+  return `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+function generate(manifest, digest) {
   if (manifest.version !== 1) throw new Error(`operations.json version ${manifest.version}: this generator knows 1`);
   const operations = [...manifest.operations].sort((a, b) => compare(a.id, b.id));
   const entities = new Map();
@@ -320,6 +328,9 @@ function generate(manifest) {
 
   // index.js
   let index = `${HEADER}\n"use strict";\n\n`;
+  index += "// The digest of the operations.json these were generated from. A workflow types document names\n";
+  index += "// the one its `$operation` ids refer to (`operations_digest`).\n";
+  index += `const DIGEST = ${JSON.stringify(digest)};\n\n`;
   index += "// Every operation by id: how queue() and the entity methods send it.\n";
   index += "const OPERATIONS = Object.freeze({\n";
   for (const op of operations) {
@@ -340,7 +351,7 @@ function generate(manifest) {
   for (const entity of entityNames) {
     index += `  ${camel(entity)}: () => require("./${entity}.js").${pascal(entity)},\n`;
   }
-  index += "});\n\nmodule.exports = { OPERATIONS, ENTITIES };\n";
+  index += "});\n\nmodule.exports = { DIGEST, OPERATIONS, ENTITIES };\n";
   files.set("index.js", index);
 
   // types.d.ts
@@ -435,8 +446,8 @@ function generate(manifest) {
 
 function main() {
   const check = process.argv.includes("--check");
-  const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
-  const { files, stats } = generate(manifest);
+  const bytes = fs.readFileSync(MANIFEST);
+  const { files, stats } = generate(JSON.parse(bytes.toString("utf8")), digestOf(bytes));
   const existing = fs.existsSync(OUT) ? fs.readdirSync(OUT).sort(compare) : [];
   const stale = [];
   for (const [name, content] of files) {
