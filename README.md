@@ -63,6 +63,73 @@ Links (`links.run`, `links.decisions`, `links.search`, `links.cancel`) are used 
 string included. A link on another origin than the client's `baseUrl` (scheme, host and port) is
 refused with a `TypeError` before any request, so the API key only ever goes to QuBe Sync.
 
+### Typed workflow starts
+
+`npx qubesync workflows` fetches your app's workflow input types (`GET /api/v2/workflows/types`)
+and writes them as a module you check in, `qube-workflows.js` with its types in
+`qube-workflows.d.ts`: a start method per workflow, and per branch of its input, whose operation
+bodies have the same types and field docs as the operation methods below.
+
+```sh
+QUBE_API_KEY=... npx qubesync workflows           # qube-workflows.js, qube-workflows.d.ts
+QUBE_API_KEY=... npx qubesync workflows --check   # in CI: exits 1 when the file is out of date
+```
+
+```js
+const { Client } = require("qubesync");
+const { setClient, addTransaction } = require("./qube-workflows");
+
+setClient(new Client({ apiKey: process.env.QUBE_API_KEY })); // once, at boot
+
+await addTransaction.invoice(connectionId, {
+  customer_ref: { list_id: "80000001-1700000000" },
+  invoice_line_add: [{ item_ref: { full_name: "Consulting" }, amount: 100 }],
+}, {
+  adds: [{ kind: "customer", add: { name: "Acme Ltd" } }],
+  reference: `invoice-${invoice.id}`,
+  webhookUrl: "https://myapp.example/qube/runs",
+});
+
+// The input alone, for start or a qubesync/kit Operation's input (an AddTransactionInvoiceInput):
+addTransaction.invoiceInput(params, { adds });
+```
+
+- A workflow whose input has branches (add_transaction's `operation`, upsert's `kind`) gets one
+  method per branch, named by the branch (camelCased: `upsert.itemService`), with the
+  discriminator filled in. A workflow's one operation body (add_transaction's `params`) comes
+  second in every branch; the other inputs go in the options object, camelCased (`txnId` for
+  `txn_id`; the input keeps the snake_case key), and so does every input of a workflow with two
+  bodies (upsert's `add` and `update`). `start(connection, input, options)` takes any branch's
+  input. A workflow without branches gets `start(connection, { ...inputs, reference, webhookUrl })`
+  and `input({ ...inputs })`. Each `*Input` leaves out null and undefined values. `connection` may
+  be anything with a `qubeId` (a qubesync/kit `Connection`).
+- Each start takes `reference`, `webhookUrl`, `version` (the published one unless given) and
+  `client` (the one `setClient` set unless given), and resolves to the run as `startRun` does. An
+  input named like one of those (`version`) is `version_` in the options, and a name JavaScript
+  reserves takes a trailing underscore where it would be a variable (`class_` for a workflow named
+  `class`).
+- The `.d.ts` exports a type per branch's input (`AddTransactionInvoiceInput`) and per workflow's
+  (`AddTransactionInput`, the union of its branches'), each operation body that operation's params
+  type (`InvoiceCreateParams`, from `qubesync/operations/invoice`), and a nested entry with
+  branches (an `adds` item) a union of an interface per branch. An operation newer than your
+  qubesync is `Record<string, unknown>`, with a warning when the served operations aren't the
+  package's. A field the workflow sets itself (QuBe Sync lists them as `set_by_workflow`: upsert's
+  `list_id` and `edit_sequence`) is optional in that body, which then gets a type of its own
+  (`RecordPaymentPaymentBody`, `UpsertCustomerUpdateBody`), and its docs say a value given for it
+  is overwritten.
+- QuBe Sync still checks every start: a field the operation doesn't take is a 422 at the call, its
+  error's `path` the body (`input.params`) and its `message` naming the field (`unknown parameter:
+  "customer_rf"`).
+- `--drafts` types each workflow's draft where it has one, so you can build against a workflow
+  before publishing it. The header records the digest and the flag, and `--check` fetches with the
+  same flag, sending the digest as `If-None-Match`. When QuBe Sync can't be reached or answers 5xx,
+  `--check` warns and exits 0; a 401 exits 1.
+- `--output PATH` chooses the module (its types go beside it; a `.cjs`, for a package with
+  `"type": "module"`, gets a `.d.cts`); `QUBE_BASE_URL` another host, with or without `/api/v2`.
+- The generated module requires nothing and runs on Node 16. `qubesync/workflow-types` has the
+  renderer (`render(document, { source })`) and `check` for a script of your own; the client call
+  is `qube.workflowTypes({ includeDrafts, etag })`, which resolves to `NOT_MODIFIED` on a 304.
+
 ### Queueing an operation
 
 Every QuickBooks operation is a method, entity then action: `create`, `update`, `query`, `delete` or
@@ -617,6 +684,12 @@ module.exports = CreateInvoice;
 const run = await CreateInvoice.start(invoice, connection);
 ```
 
+With [typed workflow starts](#typed-workflow-starts), `input` can return the generated builder's
+input, and in TypeScript say so: `input(): AddTransactionInvoiceInput` returning
+`addTransaction.invoiceInput(params, { adds })`, both from `require("../qube-workflows")` (the
+module `npx qubesync workflows` writes at your app's root). It's an object as before, so nothing
+else changes; run `npx qubesync workflows --check` in CI to keep it current.
+
 `start` takes a connection QuBe Sync has made (it throws `NotConnected` for one with no `qubeId`).
 It writes the run's row first, with a new reference and state `starting`, since a webhook can come
 before it returns; starts the run with that reference as the idempotency key and
@@ -713,11 +786,14 @@ npm test            # node:test: the client, webhooks, the kit, the store checks
 npm run test:types  # tsc --strict against test/types.ts and test/kit-types.ts
 node scripts/generate-operations.js          # regenerate operations/ from test/fixtures/operations.json
 node scripts/generate-operations.js --check  # fail when operations/ is stale
+UPDATE_GOLDEN=1 node --test test/workflow-types.test.js  # rewrite test/fixtures/workflow_types/qube-workflows.*
 ```
 
 `test/fixtures/test_vectors.json` comes from the QuBe Sync server (`mix webhook_vectors.gen`), and
 `test/fixtures/operations.json` from https://qubesync.com/libraries/operations.json
-(`mix library_operations.gen`). Copy a new version in, then regenerate; don't edit either, or
+(`mix library_operations.gen`). `test/fixtures/workflow_types/document.json` is the hand-written
+sample the Ruby gem's specs render too, and `served.json` a real `GET /api/v2/workflows/types`
+document for the shipped templates. Copy a new version in, then regenerate; don't edit either, or
 anything in `operations/`.
 
 ## License

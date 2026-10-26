@@ -44,6 +44,21 @@ QuickBooks ids live in the kit's own tables, and the app's tables need no QuBe c
   `job` (retries with a growing wait), `connectQuickbooks`, `resendOnboarding`, `answerQuestion`,
   `searchQuestion`, `retryStart`; `renderQuestion(run)` and `renderRunStatus(run)` with
   `escapeHtml` and `SEARCH_SCRIPT`; the mapping helpers; `client()`.
+- **Typed workflow starts.** `npx qubesync workflows [--drafts] [--check] [--output PATH]` (the
+  package's `bin`) fetches the app's workflow input types and writes `qube-workflows.js` and
+  `qube-workflows.d.ts`: an export per workflow (`addTransaction`), a start method and an input
+  builder per branch of its input (`addTransaction.invoice(connection, params, { adds, reference,
+  webhookUrl })`, `invoiceInput`), or `start` and `input`, and `start(connection, input, options)`
+  for any branch; `setClient`, `client`, `connectionId`. Types per branch's input
+  (`AddTransactionInvoiceInput`) and per workflow's (`AddTransactionInput`), each operation body
+  typed as `qubesync/operations/<entity>`'s params, a field the workflow sets itself optional
+  (`RecordPaymentPaymentBody`). The header records the digest and the drafts flag; `--check`
+  exits 1 when the file is out of date or on a 401, and warns and exits 0 when QuBe Sync can't be
+  reached. `qubesync/workflow-types` (`render`, `check`, `header`, `changes`, `cli`) does the work;
+  `client.workflowTypes({ includeDrafts, etag })` fetches the document (`GET /workflows/types`),
+  resolving to `NOT_MODIFIED` on a 304; `operations/index.js` carries `DIGEST`, the operations
+  manifest's sha256, to compare with the served `operations_digest`. The kit's `Operation#input`
+  may return a generated builder's input.
 - **`qubesync/express`**, for Express 4 and 5 (an optional peer dependency): `webhooks()`
   (`POST webhooks/qube/runs/:id`, `POST webhooks/qube/connections/:id`), `connect()`
   (`POST quickbooks/connections`, `POST quickbooks/connections/:id/onboarding`) and `questions()`

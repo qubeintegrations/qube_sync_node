@@ -164,7 +164,10 @@ class Operation {
     return this.run ? this.run.store : settings().store;
   }
 
-  // The run's input, from the record. Each operation says how.
+  // The run's input, from the record. Each operation says how. It may return the input builder
+  // `npx qubesync workflows` generates for its workflow, typed as <Workflow><Branch>Input
+  // (addTransaction.invoiceInput(params, { adds }) is an AddTransactionInvoiceInput, from
+  // ../qube-workflows); a plain object works the same.
   input() {
     throw new Error(`${this.constructor.name}'s input isn't written yet`);
   }

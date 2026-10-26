@@ -488,7 +488,11 @@ export declare class Operation<R extends QubeRecord = QubeRecord> {
   /** The run's store: inside a handler, the run lock's transaction. */
   readonly store: Store;
 
-  /** The run's input, from the record. */
+  /**
+   * The run's input, from the record. It may return what the module `npx qubesync workflows` writes
+   * builds for the workflow, typed as `<Workflow><Branch>Input`: `input(): AddTransactionInvoiceInput`
+   * returning `addTransaction.invoiceInput(params, { adds })`, imported from `../qube-workflows`.
+   */
   input(): unknown;
   /** Checks the reference and connection, takes a notification once, applies a run event when it's newer, under the run's lock. */
   handle(event: QubeEvent): Promise<void>;
