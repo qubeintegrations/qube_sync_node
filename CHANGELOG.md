@@ -7,6 +7,9 @@ operation classes, a connection events class) and updates the rest with `npm upd
 design as the qube_rails engine: connections are records (an account can have several), runs and
 QuickBooks ids live in the kit's own tables, and the app's tables need no QuBe columns.
 
+- **`MissingReference`** (`qubesync/kit`), which the kit's mapped operations throw from `input`
+  when a reference QuickBooks requires has no link and no name, so the start fails before anything
+  is sent.
 - **The store.** `qubesync/kit` defines a store interface (async: `transaction`;
   `createConnection`, `getConnection`, `updateConnection`, `ownedBy`, `withConnectionLock`;
   `createRun`, `getRun`, `updateRun`, `latestRun`, `withRunLock`; `once`; `findQuickbooksRecords`,

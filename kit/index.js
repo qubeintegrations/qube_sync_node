@@ -36,6 +36,7 @@ module.exports = {
   UnknownOperation: errors.UnknownOperation,
   NotReady: errors.NotReady,
   NotConnected: errors.NotConnected,
+  MissingReference: errors.MissingReference,
   StoreConflict: errors.StoreConflict,
   APIError,
   // The store

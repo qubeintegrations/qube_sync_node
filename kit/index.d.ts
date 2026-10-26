@@ -225,6 +225,8 @@ export declare class UnknownOperation extends Error {}
 export declare class NotReady extends Error {}
 /** Operation.start was given a connection QuBe Sync hasn't made yet (no qubeId). */
 export declare class NotConnected extends TypeError {}
+/** An input's reference QuickBooks requires has no link and no name: thrown from input, so the start fails before anything is sent. */
+export declare class MissingReference extends TypeError {}
 /** A store's write broke a unique key. */
 export declare class StoreConflict extends Error {}
 

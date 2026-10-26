@@ -12,6 +12,7 @@ export const {
   UnknownOperation,
   NotReady,
   NotConnected,
+  MissingReference,
   StoreConflict,
   APIError,
   memoryStore,

@@ -37,6 +37,17 @@ class NotConnected extends TypeError {
   }
 }
 
+// An operation's input has no value for a reference QuickBooks requires (an invoice's
+// customer_ref): the record has no QuickBooks link on the run's connection and no name to look it
+// up by. The kit's mapped operations throw it from input, so the start fails, before anything is
+// sent, saying which reference and which record.
+class MissingReference extends TypeError {
+  constructor(message) {
+    super(message);
+    this.name = "MissingReference";
+  }
+}
+
 // What a store throws when a write breaks one of the tables' unique keys (another worker wrote
 // the same row at the same moment). Connection#link tries once more when it sees one.
 class StoreConflict extends Error {
@@ -46,4 +57,4 @@ class StoreConflict extends Error {
   }
 }
 
-module.exports = { NotConfigured, UnknownOperation, NotReady, NotConnected, StoreConflict };
+module.exports = { NotConfigured, UnknownOperation, NotReady, NotConnected, MissingReference, StoreConflict };
