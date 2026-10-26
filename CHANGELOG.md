@@ -9,6 +9,33 @@ From the qube_rails walkthrough and the owner's review (2026-10-26):
 - **`Client#redeliverRun(connectionId, runId)`**: `POST .../workflow-runs/{id}/redeliver`, which has
   QuBe Sync send the run's latest event again; resolves to `{ run_id, event, revision, webhook_url }`
   (409 nothing to send yet, 429 asked too soon).
+- **Simulated connect**: `POST quickbooks/connections` with `simulated=1` (`connectQuickbooks({
+  simulated: true })`), outside production (`NODE_ENV`), makes a new row, a simulated connection with
+  its webhook URL, saves its `qubeId` and goes back to the page; 404 in production.
+- **A start reuses its run**: while the record's last run of the operation on that connection hasn't
+  ended, `Operation.start` returns that run (`run.reused`), resending an unconfirmed start with the
+  same reference and stored input. The check and the new row (with its input) happen under the
+  connection row's lock; an input that throws leaves a `failed` row; a 409 leaves the run
+  `starting`. The store's `latestRun` takes `{ connectionId }`; `connection.latestRun(record,
+  operation)`.
+- **Refused webhooks say what to check**: the log line has the reason, the path and the hint
+  (`SIGNATURE_HINTS`): the webhook secret and `qube env --write .env`, the clock, or not from QuBe
+  Sync. `receiveWebhook` takes `path`.
+- **Errors reach the page**: an answer, retry or redelivery that can't go through resolves to
+  `{ status: 303, error }` (was a plain-text 409 or 422); `qubesync/express` redirects back and keeps
+  the message (`req.flash`, the session, or a `qube_error` cookie) for `takeError(req, res)`, and
+  `renderRunStatus` and `renderQuestion` take `error` and show it as `.qube-error`.
+- **Sync status**: `connection.syncStatus(record, operation)` and `SyncStatus.latest(record,
+  operation)`: `not_sent`, `sending`, `needs_answer`, `in_quickbooks` (with `qbId`), `done`, `failed`
+  or `cancelled`, with `error`, `retry`, `unconfirmed` and `summaryText`, derived from the runs and
+  the link, never stored. `inQuickbooksSql`, `notInQuickbooksSql`, `needingAnswerSql` and
+  `sendingSql` write an `EXISTS` condition for list pages (PostgreSQL, MySQL, SQLite). `schema.sql`
+  adds two indexes for them; the store suite checks the conditions with `options.query`.
+  `renderRunStatus` takes a `SyncStatus` (`.qube-sync-<status>`, `data-qube-sync-status`).
+- **A stuck run's latest news, again**: `run.looksStuck()` (confirmed, not ended, quiet for 10
+  minutes, running or awaiting a question never received); `renderRunStatus` offers "Send its latest
+  news again", posting to `POST qube/runs/:id/redeliver` (`redeliver`), which calls `redeliverRun`.
+- No page refresh: qube_rails' Turbo refresh has no equivalent in Express.
 
 The integration kit's foundation, so an Express app keeps only its own code (a config, a store,
 operation classes, a connection events class) and updates the rest with `npm update`. The same

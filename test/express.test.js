@@ -99,6 +99,20 @@ async function fixtures() {
   return { account, connection, invoice, run };
 }
 
+// The message a route sent the user back with, from its one-shot cookie, or null.
+function errorCookie(res) {
+  const cookies = [].concat(res.headers["set-cookie"] || []);
+  const found = cookies.find((cookie) => cookie.startsWith("qube_error="));
+  return found ? decodeURIComponent(found.split(";")[0].slice("qube_error=".length)) : null;
+}
+
+// Back to the page with that message.
+function assertBackWith(res, message, location) {
+  assert.strictEqual(res.status, 303);
+  if (location) assert.strictEqual(res.headers.location, location);
+  assert.strictEqual(errorCookie(res), message);
+}
+
 describe("express: webhooks", () => {
   it("POST /webhooks/qube/runs/:id verifies the delivery, enqueues it with its raw body and answers 200", async () => {
     const deliveries = [];
@@ -145,7 +159,7 @@ describe("express: webhooks", () => {
       for (const [header, reason] of [[bad, "mismatch"], [undefined, "missing"], ["nonsense", "malformed"], [sign(body, SECRET, 1000), "stale"]]) {
         const res = await request(app(), { method: "POST", path, body, headers: header ? { "X-Qube-Signature": header } : {} });
         assert.strictEqual(res.status, 401);
-        assert.strictEqual(logged()[logged().length - 1].text, `QuBe Sync: refused a webhook: ${reason}`);
+        assert.strictEqual(logged()[logged().length - 1].text, `QuBe Sync: refused a webhook: ${reason} (${path}): ${kit.SIGNATURE_HINTS[reason]}`);
       }
     }
     const tampered = await request(app(), { method: "POST", path: `/webhooks/qube/runs/${run.id}`, body: `${body} `, headers: { "X-Qube-Signature": sign(body) } });
@@ -237,6 +251,36 @@ describe("express: connect", () => {
     assert.deepStrictEqual(fake.received.map((r) => [r.method, r.path, r.body]), [
       ["POST", "/api/v2/connections", { webhook_url: `${WEBHOOK_URL}/connections/${connection.id}`, name: "Main file" }],
     ]);
+  });
+
+  it("with simulated=1 makes a simulated connection on a new row and goes back to the page, even with one waiting", async () => {
+    reset();
+    const account = tables.Account.add();
+    await makeConnection(account, { qubeId: "q-waiting", status: "pending" });
+    answer(data({ id: "conn-sim-1", type: "simulated", links: {} }, 201));
+    const res = await request(app(), form("/quickbooks/connections", { simulated: "1", name: "Test file" }, account, { Referer: "/account" }));
+    assert.deepStrictEqual([res.status, res.headers.location], [303, "/account"]);
+    const [made] = await kit.Connection.ownedBy(account);
+    assert.deepStrictEqual([made.qubeId, made.name], ["conn-sim-1", "Test file"]);
+    assert.deepStrictEqual(fake.received.map((r) => [r.method, r.path, r.body]), [
+      ["POST", "/api/v2/connections", { webhook_url: `${WEBHOOK_URL}/connections/${made.id}`, name: "Test file", type: "simulated" }],
+    ]);
+  });
+
+  it("answers 404 for simulated=1 in production, asking QuBe Sync nothing", async () => {
+    reset();
+    const account = tables.Account.add();
+    const before = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      const res = await request(app(), form("/quickbooks/connections", { simulated: "1" }, account));
+      assert.strictEqual(res.status, 404);
+    } finally {
+      if (before === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = before;
+    }
+    assert.strictEqual(fake.received.length, 0);
+    assert.deepStrictEqual(await kit.Connection.ownedBy(account), []);
   });
 
   it("sends the newest connection that never connected back through setup, rather than making another", async () => {
@@ -411,24 +455,24 @@ describe("express: questions", () => {
     assert.deepStrictEqual(fake.received[0].body.data, { count: "three", taxable: false });
   });
 
-  it("answers 409 for a choice the question doesn't have, and for a run that has stopped asking", async () => {
+  it("goes back saying the question changed for a choice it doesn't have, and for a run that has stopped asking", async () => {
     reset();
     const { account, run } = await asking();
     let res = await request(app(), answerForm(run, { choice: "nope" }, account));
-    assert.deepStrictEqual([res.status, res.text], [409, kit.QUESTION_CHANGED]);
+    assertBackWith(res, kit.QUESTION_CHANGED, `/invoices/${run.recordId}`);
     await run.update({ question: null, links: null });
     res = await request(app(), answerForm(run, { choice: "use:1" }, account));
-    assert.strictEqual(res.status, 409);
+    assertBackWith(res, kit.QUESTION_CHANGED);
     assert.strictEqual(fake.received.length, 0);
   });
 
-  it("forgets the question and answers 409 when QuBe Sync says it was answered or asked again, or any other 400", async () => {
+  it("forgets the question and goes back saying so when QuBe Sync says it was answered or asked again, or any other 400", async () => {
     for (const refusal of [apiError(409, { code: "conflict" }), apiError(400, { code: "not_awaiting_input" }), apiError(400, { code: "bad_request" })]) {
       reset();
       const { account, run } = await asking();
       answer(refusal);
       const res = await request(app(), answerForm(run, { choice: "use:1" }, account));
-      assert.strictEqual(res.status, 409);
+      assertBackWith(res, kit.QUESTION_CHANGED);
       assert.strictEqual((await reload(run)).question, null);
     }
   });
@@ -438,7 +482,7 @@ describe("express: questions", () => {
     const { account, run } = await asking();
     answer(apiError(422, { code: "invalid", detail: "count must be whole" }));
     let res = await request(app(), answerForm(run, { choice: "add", "data[count]": "1.5" }, account));
-    assert.deepStrictEqual([res.status, res.text], [422, "QuBe Sync couldn't take that answer: count must be whole"]);
+    assertBackWith(res, "QuBe Sync couldn't take that answer: count must be whole");
     assert.notStrictEqual((await reload(run)).question, null);
     answer(apiError(500, "boom"));
     res = await request(app(), answerForm(run, { choice: "use:1" }, account));
@@ -590,7 +634,10 @@ describe("express: questions", () => {
 
 describe("express: retry_start", () => {
   async function unconfirmed() {
-    const made = await fixtures();
+    const account = tables.Account.add({ name: "Riverbend" });
+    const connection = await makeConnection(account);
+    const invoice = tables.Invoice.add({ accountId: account.id, number: "1001" });
+    const made = { account, connection, invoice };
     answer(apiError(500, "boom"));
     await assert.rejects(support.CreateInvoice.start(made.invoice, made.connection));
     fake.received = [];
@@ -625,11 +672,11 @@ describe("express: retry_start", () => {
     assert.strictEqual((await reload(run)).state, "failed");
   });
 
-  it("answers 409 for a run that isn't starting", async () => {
+  it("goes back saying so for a run that isn't starting", async () => {
     reset();
     const { account, run } = await fixtures();
     const res = await request(app(), retry(run, account));
-    assert.deepStrictEqual([res.status, res.text], [409, kit.NOT_STARTING]);
+    assertBackWith(res, kit.NOT_STARTING, `/invoices/${run.recordId}`);
     assert.strictEqual(fake.received.length, 0);
   });
 
@@ -647,6 +694,125 @@ describe("express: retry_start", () => {
     reset();
     const { run } = await unconfirmed();
     assert.strictEqual((await request(app(), retry(run, null))).status, 401);
+  });
+});
+
+describe("express: redeliver", () => {
+  // A confirmed run gone quiet: QUIET_AFTER_SECONDS is 0 for the test, and a moment has passed.
+  async function stuck(changes = {}) {
+    const made = await fixtures();
+    await made.run.update({ qubeRunId: "run-q-1", state: "running", ...changes });
+    kit.Run.QUIET_AFTER_SECONDS = 0;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return { ...made, run: await reload(made.run) };
+  }
+
+  function redeliver(run, account) {
+    return form(`/qube/runs/${run.id}/redeliver`, {}, account, { Referer: `/invoices/${run.recordId}` });
+  }
+
+  async function quietly(fn) {
+    const quiet = kit.Run.QUIET_AFTER_SECONDS;
+    try {
+      await fn();
+    } finally {
+      kit.Run.QUIET_AFTER_SECONDS = quiet;
+    }
+  }
+
+  it("POST /qube/runs/:id/redeliver asks QuBe Sync to send a stuck run's latest event again, and goes back", async () =>
+    quietly(async () => {
+      reset();
+      const { account, run } = await stuck();
+      answer(data({ run_id: "run-q-1", event: "workflow_run.awaiting_input", revision: 3, webhook_url: run.webhookUrl() }));
+      const res = await request(app(), redeliver(run, account));
+      assertBackWith(res, null, `/invoices/${run.recordId}`);
+      assert.deepStrictEqual(fake.received.map((r) => [r.method, r.path]), [["POST", `/api/v2/connections/${CONN}/workflow-runs/run-q-1/redeliver`]]);
+    }));
+
+  it("takes a run awaiting a question it never received, and refuses one with its question or not quiet", async () =>
+    quietly(async () => {
+      reset();
+      const { account, run } = await stuck({ state: "awaiting_input" });
+      answer(data({ run_id: "run-q-1" }));
+      assertBackWith(await request(app(), redeliver(run, account)), null);
+      await run.update({ question: { token: "t", choices: [] } });
+      assertBackWith(await request(app(), redeliver(run, account)), kit.NOT_QUIET);
+      await run.update({ question: null });
+      kit.Run.QUIET_AFTER_SECONDS = 600;
+      assertBackWith(await request(app(), redeliver(run, account)), kit.NOT_QUIET);
+      assert.strictEqual(fake.received.length, 1);
+    }));
+
+  it("goes back saying why for QuBe Sync's 409 and 429, and for no answer; raises for anything else", async () =>
+    quietly(async () => {
+      reset();
+      const { account, run } = await stuck();
+      answer(apiError(409, { code: "nothing_to_redeliver" }));
+      assertBackWith(await request(app(), redeliver(run, account)), kit.REDELIVERY_REFUSED[409]);
+      answer(apiError(429, { code: "rate_limited" }));
+      assertBackWith(await request(app(), redeliver(run, account)), kit.REDELIVERY_REFUSED[429]);
+      answer({ destroy: true });
+      assertBackWith(await request(app(), redeliver(run, account)), kit.NO_ANSWER);
+      answer(apiError(500, "boom"));
+      assert.strictEqual((await request(app(), redeliver(run, account))).status, 500);
+    }));
+
+  it("answers 404 for another account's run, and is behind the app's sign-in", async () =>
+    quietly(async () => {
+      reset();
+      const { run } = await stuck();
+      const other = tables.Account.add();
+      assert.strictEqual((await request(app(), redeliver(run, other))).status, 404);
+      assert.match(loggedText(), new RegExp(`refused a redelivery for run ${run.id}: authorizeQuestion said no`));
+      assert.strictEqual((await request(app(), redeliver(run, null))).status, 401);
+      assert.strictEqual(fake.received.length, 0);
+    }));
+});
+
+describe("express: takeError", () => {
+  // The record's page: the message once, through the kit's HTML.
+  function page(made) {
+    made.get("/invoices/:id", (req, res) => res.type("text/html").send(kit.renderRunStatus(null, { error: qube.takeError(req, res) })));
+    return made;
+  }
+
+  it("shows the message a route went back with once, from a cookie", async () => {
+    reset();
+    const { account, run } = await fixtures();
+    const made = app();
+    const back = await request(made, form(`/qube/runs/${run.id}/retry_start`, {}, account, { Referer: `/invoices/${run.recordId}` }));
+    const cookie = back.headers["set-cookie"][0].split(";")[0];
+    assert.match(back.headers["set-cookie"][0], /Path=\/; .*HttpOnly; SameSite=Lax/);
+    const shown = await request(page(express()), { path: `/invoices/${run.recordId}`, headers: { cookie } });
+    assert.strictEqual(shown.text, `<p class="qube-error">${kit.escapeHtml(kit.NOT_STARTING)}</p>`);
+    assert.match(shown.headers["set-cookie"][0], /^qube_error=; .*Expires=Thu, 01 Jan 1970/);
+    const again = await request(page(express()), { path: `/invoices/${run.recordId}` });
+    assert.strictEqual(again.text, "");
+  });
+
+  it("keeps it in the session when there is one, and in req.flash when there's that", async () => {
+    reset();
+    const { account, run } = await fixtures();
+    const session = {};
+    const flashed = [];
+    for (const middleware of [
+      (req, res, next) => ((req.session = session), next()),
+      (req, res, next) => ((req.flash = (key, value) => (value === undefined ? flashed.splice(0).map((f) => f[1]) : flashed.push([key, value]))), next()),
+    ]) {
+      const made = express();
+      made.use(middleware);
+      made.use((req, res, next) => ((req.account = account), next()));
+      made.use(qube.questions());
+      page(made);
+      const back = await request(made, form(`/qube/runs/${run.id}/retry_start`, {}, account, { Referer: `/invoices/${run.recordId}` }));
+      assert.strictEqual(back.status, 303);
+      assert.strictEqual(back.headers["set-cookie"], undefined);
+      const shown = await request(made, { path: `/invoices/${run.recordId}` });
+      assert.ok(shown.text.includes(kit.escapeHtml(kit.NOT_STARTING)));
+      assert.strictEqual((await request(made, { path: `/invoices/${run.recordId}` })).text, "");
+    }
+    assert.deepStrictEqual(session, {});
   });
 });
 

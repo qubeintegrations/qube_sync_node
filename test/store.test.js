@@ -42,6 +42,8 @@ describe("schema.sql", () => {
       "UNIQUE INDEX index_qube_notifications_on_run_and_delivery ON qube_notifications (run_id, delivery_id)",
       "UNIQUE INDEX index_qube_quickbooks_records_on_qb_id ON qube_quickbooks_records (connection_id, list, qb_id)",
       "UNIQUE INDEX index_qube_quickbooks_records_on_record ON qube_quickbooks_records (connection_id, kind, record_type, record_id)",
+      "INDEX index_qube_quickbooks_records_on_connection_and_record ON qube_quickbooks_records (connection_id, record_type, record_id)",
+      "INDEX index_qube_runs_on_connection_record_and_state ON qube_runs (connection_id, record_type, record_id, operation, state)",
     ]) {
       assert.ok(sql.includes(`CREATE ${index};`), index);
     }

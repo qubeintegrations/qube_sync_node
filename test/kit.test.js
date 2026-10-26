@@ -47,6 +47,14 @@ async function fixtures() {
   return { account, connection, invoice, run };
 }
 
+// An account's connection and an invoice with no run yet.
+async function unsent() {
+  const account = tables.Account.add({ name: "Riverbend" });
+  const connection = await makeConnection(account);
+  const invoice = tables.Invoice.add({ accountId: account.id, number: "1001" });
+  return { account, connection, invoice };
+}
+
 // The job, as the queue runs it, for one of run's events; resolves to the run as it is after.
 async function runEvent(run, name, changes = {}) {
   await kit.run({ kind: "run", id: String(run.id), body: runBody(name, run, changes) });
@@ -694,10 +702,34 @@ describe("kit: receiveWebhook", () => {
   });
 });
 
+describe("kit: receiveWebhook's refusals", () => {
+  it("logs the reason, the path and what to check, never the secret or the body", async () => {
+    reset({ enqueue: () => {} });
+    const { run } = await fixtures();
+    const body = runBody("workflow_run.completed", run);
+    const cases = [
+      [support.sign(body, "whsec_someone_else"), "mismatch", /QUBE_WEBHOOK_SECRET .*`qube env --write \.env`/],
+      [support.sign(body, SECRET, 1000), "stale", /Check the clock/],
+      [undefined, "missing", /isn't from QuBe Sync/],
+      ["nonsense", "malformed", /t=<seconds>,v1=<hex>, so it isn't from QuBe Sync/],
+    ];
+    for (const [signature, reason, hint] of cases) {
+      const answered = await kit.receiveWebhook({ kind: "run", id: run.id, body, signature, path: `/webhooks/qube/runs/${run.id}` });
+      assert.strictEqual(answered.status, 401);
+      const line = logged()[logged().length - 1].text;
+      assert.ok(line.startsWith(`QuBe Sync: refused a webhook: ${reason} (/webhooks/qube/runs/${run.id}): `), line);
+      assert.match(line, hint);
+    }
+    await kit.receiveWebhook({ kind: "run", id: run.id, body, signature: "nonsense" });
+    assert.ok(logged()[logged().length - 1].text.startsWith(`QuBe Sync: refused a webhook: malformed (run ${run.id}): `));
+    assert.ok(!loggedText().includes(SECRET) && !loggedText().includes(run.reference));
+  });
+});
+
 describe("kit: Operation.start", () => {
   it("writes the run first, starts it on the connection's qubeId, and keeps QuBe Sync's answer", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     let seen = null;
     answer({
       ...data({ id: "run-q-1", state: "running", links: { run: "https://qube.example/r/1", cancel: "https://qube.example/r/1/cancel" } }, 201),
@@ -729,7 +761,7 @@ describe("kit: Operation.start", () => {
 
   it("keeps a state a webhook wrote before the answer came back", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     answer({
       ...data({ id: "run-q-1", state: "running" }, 201),
       before: async () => {
@@ -755,7 +787,7 @@ describe("kit: Operation.start", () => {
 
   it("marks the run failed and throws again when QuBe Sync refuses the start (a 4xx)", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     answer(apiError(422, { code: "invalid_input", message: "bad" }));
     await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err instanceof kit.APIError && err.status === 422);
     const run = await kit.Run.latestFor(invoice, "create_invoice");
@@ -765,20 +797,24 @@ describe("kit: Operation.start", () => {
 
   it("marks the run failed when its input throws, before anything is sent", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     class Broken extends CreateInvoice {
       input() {
         throw new Error("no lines");
       }
     }
     await assert.rejects(Broken.start(invoice, connection), /no lines/);
-    assert.strictEqual((await kit.Run.latestFor(invoice, "create_invoice")).state, "failed");
+    const failed = await kit.Run.latestFor(invoice, "create_invoice");
+    assert.deepStrictEqual([failed.state, failed.input], ["failed", null]);
     assert.strictEqual(fake.received.length, 0);
+    // Ended: the next start makes a new run.
+    await assert.rejects(Broken.start(invoice, connection), /no lines/);
+    assert.notStrictEqual(String((await kit.Run.latestFor(invoice, "create_invoice")).id), String(failed.id));
   });
 
   it("leaves the run starting, with its reference and input, when the start gets no answer (a 5xx)", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     answer(apiError(500, "boom"));
     await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err.status === 500);
     const run = await kit.Run.latestFor(invoice, "create_invoice");
@@ -788,9 +824,89 @@ describe("kit: Operation.start", () => {
     assert.strictEqual(run.qubeRunId, null);
   });
 
+  it("returns the record's run that hasn't ended rather than starting another, and a new one once it has", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    answer(data({ id: "run-q-1", state: "running" }, 201));
+    const first = await CreateInvoice.start(invoice, connection);
+    assert.strictEqual(first.reused, false);
+    const again = await CreateInvoice.start(invoice, connection);
+    assert.deepStrictEqual([String(again.id), again.reused, again.reference], [String(first.id), true, first.reference]);
+    assert.strictEqual(fake.received.length, 1);
+
+    await first.update({ state: "completed", outcome: "added" });
+    answer(data({ id: "run-q-2", state: "running" }, 201));
+    const next = await CreateInvoice.start(invoice, connection);
+    assert.notStrictEqual(String(next.id), String(first.id));
+    assert.notStrictEqual(next.reference, first.reference);
+    assert.strictEqual(next.reused, false);
+  });
+
+  it("resends an unconfirmed start it reuses, with the same reference and the stored input", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    answer(apiError(500, "boom"));
+    await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err.status === 500);
+    invoice.number = "changed since";
+    answer(data({ id: "run-q-1", state: "running" }, 201));
+    const run = await CreateInvoice.start(invoice, connection);
+    assert.strictEqual(run.reused, true);
+    const sent = fake.received.filter((r) => r.method === "POST");
+    assert.strictEqual(sent.length, 2);
+    const [first, last] = [sent[0], sent[sent.length - 1]];
+    assert.deepStrictEqual(last.body, first.body);
+    assert.strictEqual(last.headers["idempotency-key"], first.headers["idempotency-key"]);
+    assert.deepStrictEqual([run.qubeRunId, run.state], ["run-q-1", "running"]);
+  });
+
+  it("keeps runs on different connections apart", async () => {
+    reset();
+    const { account, connection, invoice } = await unsent();
+    const second = await makeConnection(account, { qubeId: "conn-q-second" });
+    answer(data({ id: "run-q-1", state: "running" }, 201));
+    const here = await CreateInvoice.start(invoice, connection);
+    const there = await CreateInvoice.start(invoice, second);
+    assert.notStrictEqual(String(here.id), String(there.id));
+    assert.strictEqual(there.reused, false);
+  });
+
+  it("finds one row for two starts at once (a double click), and sends one reference", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    answer(data({ id: "run-q-1", state: "running" }, 201));
+    const [a, b] = await Promise.all([CreateInvoice.start(invoice, connection), CreateInvoice.start(invoice, connection)]);
+    assert.strictEqual(String(a.id), String(b.id));
+    assert.deepStrictEqual([a.reused, b.reused].sort(), [false, true]);
+    const references = new Set(fake.received.map((r) => r.headers["idempotency-key"]));
+    assert.strictEqual(references.size, 1);
+  });
+
+  it("leaves the run starting on a 409 (the reference in use by a call still in flight)", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    answer(apiError(409, { code: "idempotency_key_in_use" }));
+    await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err.status === 409);
+    assert.strictEqual((await kit.Run.latestFor(invoice, "create_invoice")).state, "starting");
+  });
+
+  it("computes the input under the connection's lock, reading through its transaction", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    let seen = null;
+    class Reading extends CreateInvoice {
+      async input() {
+        seen = [this.run.state, this.run.id, String(this.connection.id), this.store === this.connection.store];
+        return { ref: this.record.number };
+      }
+    }
+    answer(data({ id: "run-q-1", state: "running" }, 201));
+    await Reading.start(invoice, connection);
+    assert.deepStrictEqual(seen, ["starting", undefined, String(connection.id), true]);
+  });
+
   it("leaves the run starting when the connection drops", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     answer({ destroy: true });
     await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err.code === "ECONNRESET");
     assert.strictEqual((await kit.Run.latestFor(invoice, "create_invoice")).state, "starting");
@@ -800,7 +916,7 @@ describe("kit: Operation.start", () => {
 describe("kit: retryStart", () => {
   it("resends the same reference (as the Idempotency-Key), workflow, input and webhook URL", async () => {
     reset();
-    const { connection, invoice } = await fixtures();
+    const { connection, invoice } = await unsent();
     answer(apiError(500, "boom"));
     await assert.rejects(CreateInvoice.start(invoice, connection));
     const run = await kit.Run.latestFor(invoice, "create_invoice");
@@ -861,6 +977,24 @@ describe("kit: Run", () => {
     const later = new Date(Date.now() + 61 * 1000);
     assert.strictEqual(run.unconfirmed(later), true);
     assert.strictEqual(run.summaryText(later), "Not confirmed by QuBe Sync yet");
+  });
+
+  it("looks stuck when confirmed, not ended, quiet for 10 minutes, and running or awaiting a question it never got", async () => {
+    reset();
+    const { run } = await fixtures();
+    const later = new Date(Date.now() + 601 * 1000);
+    assert.strictEqual(run.looksStuck(later), false); // no qubeRunId
+    await run.update({ qubeRunId: "run-q-1" });
+    assert.strictEqual(run.looksStuck(), false);
+    assert.strictEqual(run.looksStuck(later), true);
+    await run.update({ state: "awaiting_input" });
+    assert.strictEqual(run.looksStuck(later), true);
+    await run.update({ question: { token: "t", choices: [] } });
+    assert.strictEqual(run.looksStuck(later), false);
+    for (const state of ["starting", "completed", "failed", "cancelled"]) {
+      await run.update({ state, question: null });
+      assert.strictEqual(run.looksStuck(later), false, state);
+    }
   });
 
   it("gives an error's detail only when it isn't its message", async () => {
@@ -1037,13 +1171,49 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     const { run } = await fixtures();
     await run.update({ state: "failed", outcome: "failed", endedAt: new Date(), error: { message: "Customer <missing>", detail: "No customer named Riverbend" } });
     const html = kit.renderRunStatus(run);
-    assert.ok(html.startsWith(`<div class="qube-run-status qube-run-failed">`));
+    assert.ok(html.startsWith(`<div class="qube-run-status qube-sync-failed qube-run-failed" data-qube-sync-status="failed">`));
     assert.ok(html.includes(`<p class="qube-run-summary">Failed: Customer &lt;missing&gt;</p>`));
     assert.ok(html.includes(`<p class="qube-run-error-detail">No customer named Riverbend</p>`));
     await run.update({ state: "completed", outcome: "cancelled", error: null });
     assert.ok(kit.renderRunStatus(run).includes(`qube-run-cancelled`));
     assert.ok(!kit.renderRunStatus(run).includes("qube-run-error-detail"));
     assert.strictEqual(kit.renderRunStatus(null), "");
+  });
+
+  it("shows a sync status's classes and summary, and nothing for not_sent", async () => {
+    reset();
+    const { connection, invoice, run } = await fixtures();
+    assert.strictEqual(kit.renderRunStatus(await connection.syncStatus(tables.Invoice.add(), "create_invoice")), "");
+    await run.update({ state: "completed", outcome: "added", endedAt: new Date() });
+    await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+    const html = kit.renderRunStatus(await connection.syncStatus(invoice, "create_invoice"));
+    assert.ok(html.startsWith(`<div class="qube-run-status qube-sync-in_quickbooks qube-run-completed" data-qube-sync-status="in_quickbooks">`));
+    assert.ok(html.includes(`<p class="qube-run-summary">Added to QuickBooks</p>`));
+    await run.update({ state: "awaiting_input", question: { token: "t", message: "Which?", choices: [] } });
+    const asking = await connection.syncStatus(invoice, "create_invoice");
+    assert.ok(kit.renderQuestion(asking).includes(`<p class="qube-question-message">Which?</p>`));
+  });
+
+  it("offers to send a stuck run's latest news again, and only then", async () => {
+    reset();
+    const { run } = await fixtures();
+    await run.update({ qubeRunId: "run-q-1" });
+    assert.ok(!kit.renderRunStatus(run).includes("redeliver"));
+    const later = new Date(Date.now() + 601 * 1000);
+    const html = kit.renderRunStatus(run, { now: later, csrfToken: "t", mount: "/app" });
+    assert.ok(html.includes(`<p class="qube-run-quiet">No news from QuBe Sync about it for a while.</p>`));
+    assert.ok(html.includes(`<form class="qube-redeliver-form" method="post" action="/app/qube/runs/${run.id}/redeliver">`));
+    assert.ok(html.includes(`<button type="submit" class="qube-redeliver">Send its latest news again</button>`));
+    assert.ok(html.includes(`<input type="hidden" name="_csrf" value="t">`));
+  });
+
+  it("shows an error once, escaped, above whatever else it shows", async () => {
+    reset();
+    const { run } = await fixtures();
+    assert.strictEqual(kit.renderRunStatus(null, { error: "<b>no</b>" }), `<p class="qube-error">&lt;b&gt;no&lt;/b&gt;</p>`);
+    assert.ok(kit.renderRunStatus(run, { error: "Changed" }).startsWith(`<p class="qube-error">Changed</p>\n<div class="qube-run-status`));
+    assert.strictEqual(kit.renderQuestion(run, { error: "Changed" }), `<p class="qube-error">Changed</p>`);
+    assert.strictEqual(kit.renderRunStatus(run, { error: null }).includes("qube-error"), false);
   });
 
   it("offers to try an unconfirmed start again, and only then", async () => {
@@ -1056,6 +1226,119 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     assert.ok(html.includes(`<form class="qube-retry-start-form" method="post" action="/app/qube/runs/${run.id}/retry_start">`));
     assert.ok(html.includes(`<input type="hidden" name="_csrf" value="t">`));
     assert.ok(html.includes(`Not confirmed by QuBe Sync yet`));
+  });
+});
+
+describe("kit: sync status", () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  async function status(connection, invoice) {
+    return connection.syncStatus(invoice, "create_invoice");
+  }
+
+  it("is not_sent with no run and no link, and refuses a slug that isn't configured", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    const found = await status(connection, invoice);
+    assert.deepStrictEqual(found.toJSON(), { status: "not_sent", qbId: null, error: null, retry: false, unconfirmed: false, summaryText: null });
+    await assert.rejects(connection.syncStatus(invoice, "nope"), /no operation has the slug "nope"/);
+  });
+
+  it("says sending or needs_answer while the latest run hasn't ended, whatever the link says", async () => {
+    reset();
+    const { connection, invoice, run } = await fixtures();
+    await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+    for (const [state, expected] of [["starting", "sending"], ["running", "sending"], ["awaiting_input", "needs_answer"]]) {
+      await run.update({ state });
+      const found = await status(connection, invoice);
+      assert.deepStrictEqual([found.status, found.qbId, found.retry], [expected, "T1", false], state);
+    }
+    await run.update({ state: "starting" });
+    const later = await connection.syncStatus(invoice, "create_invoice", { now: new Date(Date.now() + 61 * 1000) });
+    assert.deepStrictEqual([later.status, later.unconfirmed, later.summaryText], ["sending", true, "Not confirmed by QuBe Sync yet"]);
+  });
+
+  it("says failed or cancelled after the link, with retry only when there's no link", async () => {
+    reset();
+    const { connection, invoice, run } = await fixtures();
+    await run.update({ state: "failed", endedAt: new Date(), error: { message: "Customer not found" } });
+    let found = await status(connection, invoice);
+    assert.deepStrictEqual([found.status, found.retry, found.error, found.summaryText], ["failed", true, { message: "Customer not found" }, "Failed: Customer not found"]);
+    await run.update({ state: "cancelled", cancelReason: "asked" });
+    found = await status(connection, invoice);
+    assert.deepStrictEqual([found.status, found.retry, found.error], ["cancelled", true, null]);
+    // A link made since the stop wins.
+    await tick();
+    await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+    found = await status(connection, invoice);
+    assert.deepStrictEqual([found.status, found.qbId, found.summaryText, found.retry], ["in_quickbooks", "T1", "In QuickBooks", false]);
+    // A stop since the link wins, and doesn't offer a retry (the record is in QuickBooks).
+    await tick();
+    const again = await makeRun(invoice, connection, { state: "failed" });
+    await again.update({ endedAt: new Date() });
+    found = await status(connection, invoice);
+    assert.deepStrictEqual([found.status, found.qbId, found.retry], ["failed", "T1", false]);
+  });
+
+  it("says in_quickbooks with its qb_id when linked, and done for a completed run that linked nothing", async () => {
+    reset();
+    const { connection, invoice, run } = await fixtures();
+    await run.update({ state: "completed", outcome: "added", endedAt: new Date() });
+    let found = await status(connection, invoice);
+    assert.deepStrictEqual([found.status, found.qbId, found.summaryText, found.retry], ["done", null, "Added to QuickBooks", false]);
+    await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+    found = await status(connection, invoice);
+    assert.deepStrictEqual([found.status, found.qbId, found.summaryText], ["in_quickbooks", "T1", "Added to QuickBooks"]);
+    assert.strictEqual(String(found), "in_quickbooks");
+  });
+
+  it("is per connection, and latest reads it on the latest run's connection", async () => {
+    reset();
+    const { account, connection, invoice } = await unsent();
+    const second = await makeConnection(account, { qubeId: "conn-q-second" });
+    await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+    await tick();
+    await makeRun(invoice, second, { state: "awaiting_input" });
+    assert.strictEqual((await status(connection, invoice)).status, "in_quickbooks");
+    assert.strictEqual((await status(second, invoice)).status, "needs_answer");
+    const latest = await kit.SyncStatus.latest(invoice, "create_invoice");
+    assert.deepStrictEqual([latest.status, String(latest.run.connectionId)], ["needs_answer", String(second.id)]);
+    const none = await kit.SyncStatus.latest(tables.Invoice.add(), "create_invoice");
+    assert.strictEqual(none.status, "not_sent");
+  });
+
+  it("has SQL conditions for list pages, with the values checked and inlined", async () => {
+    reset();
+    const { connection } = await unsent();
+    const id = connection.id;
+    assert.strictEqual(
+      connection.inQuickbooksSql("invoices", { recordType: "Invoice" }),
+      `EXISTS (SELECT 1 FROM qube_quickbooks_records WHERE qube_quickbooks_records.connection_id = ${id} AND qube_quickbooks_records.record_type = 'Invoice' AND qube_quickbooks_records.record_id = CAST(invoices.id AS VARCHAR(255)))`
+    );
+    assert.ok(connection.notInQuickbooksSql("i", { recordType: "Invoice", primaryKey: "uuid" }).startsWith("NOT EXISTS (SELECT 1 FROM qube_quickbooks_records WHERE"));
+    assert.ok(connection.notInQuickbooksSql("i", { recordType: "Invoice", primaryKey: "uuid" }).endsWith("= CAST(i.uuid AS VARCHAR(255)))"));
+    assert.strictEqual(
+      connection.needingAnswerSql("app.invoices", { recordType: "Invoice", operation: "create_invoice", dialect: "sqlite" }),
+      `EXISTS (SELECT 1 FROM qube_runs WHERE qube_runs.connection_id = ${id} AND qube_runs.record_type = 'Invoice' AND qube_runs.record_id = CAST(app.invoices.id AS VARCHAR(255)) AND qube_runs.operation = 'create_invoice' AND qube_runs.state IN ('awaiting_input'))`
+    );
+    assert.ok(connection.sendingSql("invoices", { recordType: "Invoice", operation: "create_invoice" }).endsWith("qube_runs.state IN ('starting', 'running'))"));
+    assert.ok(connection.inQuickbooksSql("invoices", { recordType: "Invoice", dialect: "mysql" }).includes("= CAST(invoices.id AS CHAR))"));
+    assert.ok(
+      connection.inQuickbooksSql("invoices", { recordType: "Invoice", dialect: "mysql", collation: "utf8mb4_unicode_ci" }).includes(
+        "= CONVERT(CAST(invoices.id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci)"
+      )
+    );
+    for (const bad of [
+      () => connection.inQuickbooksSql("invoices; DROP TABLE x", { recordType: "Invoice" }),
+      () => connection.inQuickbooksSql("invoices", { recordType: "Invoice' OR '1'='1" }),
+      () => connection.inQuickbooksSql("invoices", {}),
+      () => connection.inQuickbooksSql("invoices", { recordType: "Invoice", primaryKey: "id)" }),
+      () => connection.inQuickbooksSql("invoices", { recordType: "Invoice", dialect: "oracle" }),
+      () => connection.sendingSql("invoices", { recordType: "Invoice" }),
+      () => connection.inQuickbooksSql("invoices", { recordType: "Invoice", dialect: "mysql", collation: "x; --" }),
+    ]) {
+      assert.throws(bad, TypeError);
+    }
   });
 });
 

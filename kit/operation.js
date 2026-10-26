@@ -39,17 +39,11 @@ const RUN_EVENT_FIELDS = Object.freeze(["state", "outcome", "error", "cancelReas
 // run keeps its reference, revision, state and question, and the QuickBooks ids an ending carries
 // go on the connection (connection.link), keyed by kind.
 class Operation {
-  // Starts the operation's run for record, one your app has saved, on connection (a Connection
-  // the customer has finished onboarding, so it has a qubeId), and resolves to the run. The row is
-  // written first, with a new reference (<slug>-<record id>-<uuid>) and state "starting", since a
-  // webhook can arrive before this returns, and keeps the input it was started with.
-  //
-  // The reference is also the Idempotency-Key. When QuBe Sync refuses the start (a 4xx: bad
-  // input, a workflow that isn't published) or the input throws, the row is marked "failed" and
-  // the error thrown: nothing was started, and starting again makes a new run. When the start
-  // gets no answer (a timeout, a 5xx, a dropped connection) it may have started, so the row stays
-  // "starting" and the error is thrown: send it again with run.retryStart(), never a new start, or
-  // a run that did start runs twice (two invoices).
+  // Starts the operation's run for record on connection (one with a qubeId) and resolves to the
+  // run, written first ("starting") with a new reference and its input. While the record's last
+  // run of this operation on connection hasn't ended, it returns that run instead (run.reused),
+  // resending an unconfirmed start with the same reference. See the README for refusals and
+  // starts that get no answer.
   static async start(record, connection) {
     if (!Operation.#madeByQubeSync(connection)) {
       throw new NotConnected(
@@ -58,27 +52,51 @@ class Operation {
     }
 
     const on = connection instanceof Connection ? connection : new Connection(connection);
-    const [type, id] = recordKey(record);
-    const row = await on.store.createRun({
-      connectionId: on.id,
-      operation: this.slug,
-      recordType: type,
-      recordId: id,
-      reference: `${this.slug}-${id}-${randomUUID()}`,
-      state: "starting",
-      revision: 0,
-    });
+    const { row, reused, inputError } = await Operation.#claimRun.call(this, record, on);
+    if (inputError) throw inputError;
+
     const run = new Run(row, on.store, on);
-    let input;
-    try {
-      // As JSON reads it back, so a retry sends exactly what the first start did.
-      input = asJson(await new this(record, run).input());
-    } catch (err) {
-      await Operation.#markFailed(run);
-      throw err;
+    if (reused) {
+      run.reused = true;
+      return Operation.#resume.call(this, run);
     }
-    await run.update({ input });
-    return Operation.#sendStart.call(this, run, input);
+    return Operation.#sendStart.call(this, run, run.input);
+  }
+
+  // Under the connection row's lock, so a double click finds one row: the record's run that
+  // hasn't ended, or a new row written with its input (or "failed", with the error the input
+  // threw, kept once the lock's transaction commits).
+  static async #claimRun(record, connection) {
+    const [type, id] = recordKey(record);
+    return connection.store.withConnectionLock(connection.id, async (tx) => {
+      const going = await tx.latestRun(type, id, this.slug, { connectionId: connection.id });
+      if (going && !Run.ENDED_STATES.includes(going.state)) return { row: going, reused: true };
+
+      const fields = {
+        connectionId: connection.id,
+        operation: this.slug,
+        recordType: type,
+        recordId: id,
+        reference: `${this.slug}-${id}-${randomUUID()}`,
+        state: "starting",
+        revision: 0,
+      };
+      const unsaved = new Run(fields, tx, new Connection({ ...connection }, tx));
+      let input;
+      try {
+        // As JSON reads it back, so a retry sends exactly what the first start did.
+        input = asJson(await new this(record, unsaved).input());
+      } catch (err) {
+        return { row: await tx.createRun({ ...fields, state: "failed" }), inputError: err };
+      }
+      return { row: await tx.createRun({ ...fields, input }) };
+    });
+  }
+
+  // A reused run: its start sent again while QuBe Sync hasn't confirmed it, else as it is.
+  static async #resume(run) {
+    if (run.state === "starting" && blank(run.qubeRunId)) return Operation.#sendStart.call(this, run, run.input);
+    return run;
   }
 
   // Sends a start that got no answer again (run.retryStart() calls it): the same reference as the
@@ -103,11 +121,17 @@ class Operation {
         webhookUrl: run.webhookUrl(),
       });
     } catch (err) {
-      if (isRefused(err)) await Operation.#markFailed(run); // refused: nothing started
+      if (Operation.#refused(err)) await Operation.#markFailed(run);
       throw err;
     }
     await Operation.#recordStart(run, started !== null && typeof started === "object" ? started : {});
     return run;
+  }
+
+  // A 4xx: nothing started. Not a 409, the reference in use by a call still in flight (the
+  // other click of a double click), whose start may land: that run stays "starting".
+  static #refused(err) {
+    return isRefused(err) && err.status !== 409;
   }
 
   static async #markFailed(run) {

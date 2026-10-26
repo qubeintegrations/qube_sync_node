@@ -397,8 +397,10 @@ Everything an Express app's QuBe Sync integration has that's the same in every a
   through QuBe Sync's setup;
 - the webhook endpoint (verify the signature, find the row, enqueue) and its job (check the event
   is that run's or that connection's, apply it, call your handler);
-- the question routes (answer by choice, search a record field), a start sent again, and their
-  HTML;
+- the question routes (answer by choice, search a record field), a start sent again, a stuck
+  run's latest event sent again, and their HTML;
+- each record's [sync status](#sync-status), worked out from those tables, and SQL conditions for
+  list pages;
 - `Operation` and `ConnectionEvents`, the bases of your classes.
 
 Your app keeps its own code, which this package never names, in `quickbooks-desktop/`: one config
@@ -435,7 +437,7 @@ column); `input`, `error`, `question` and `links` are JSON kept as text; times a
 | `ownedBy(ownerType, ownerId)` | an owner's connections, newest first |
 | `withConnectionLock(id, fn)` | `fn(tx, row)` in a transaction holding the row's lock (`SELECT ... FOR NO KEY UPDATE`), with the row as it is now or `null`; re-entrant in its own transaction |
 | `createRun(fields)` / `getRun(id)` / `updateRun(id, changes)` | a `qube_runs` row |
-| `latestRun(recordType, recordId, operation)` | a record's newest run of an operation, or `null` |
+| `latestRun(recordType, recordId, operation, { connectionId })` | a record's newest run of an operation (on that connection, with `connectionId`), or `null` |
 | `withRunLock(id, fn)` | as `withConnectionLock`, for a run |
 | `once(runId, deliveryId, fn)` | runs `fn` unless the run has taken that delivery id (`qube_notifications`), in the same transaction, and answers whether it ran |
 | `findQuickbooksRecords(where, { limit, lock })` | `qube_quickbooks_records` rows by `connectionId` and any of `kind`, `list`, `qbId`, `recordType`, `recordId`, in id order |
@@ -443,14 +445,25 @@ column); `input`, `error`, `question` and `links` are JSON kept as text; times a
 
 A write that breaks one of `schema.sql`'s unique keys throws `StoreConflict`. An id from a URL
 that isn't a valid id (`"abc"`) finds nothing. Check your store with the suite, from a test file of
-its own:
+its own; with `query`, it checks the [sync status SQL conditions](#sync-status) on your database
+too:
 
 ```js
 // test/qube-store.test.js
 const storeTests = require("qubesync/kit/store-tests");
 const { makeStore } = require("../quickbooks-desktop/store");
 
-storeTests(async () => makeStore(await freshTestDatabase()));
+storeTests(async () => makeStore(await freshTestDatabase()), {
+  query: async (store, sql) => (await store.pool.query(sql)).rows, // your driver's
+  dialect: "postgres", // or "mysql", "sqlite"
+});
+```
+
+Tables made from an earlier `schema.sql` need its two sync status indexes:
+
+```sql
+CREATE INDEX index_qube_runs_on_connection_record_and_state ON qube_runs (connection_id, record_type, record_id, operation, state);
+CREATE INDEX index_qube_quickbooks_records_on_connection_and_record ON qube_quickbooks_records (connection_id, record_type, record_id);
 ```
 
 ### The config file: `quickbooks-desktop/config.js`
@@ -522,20 +535,34 @@ app.use(qube.questions(config));
 
 | Route | What it does |
 | --- | --- |
-| `POST quickbooks/connections` | Connect, for the signed-in account. Sends its newest connection that has never connected (`pending` or `setup_cancelled`) back through setup, so clicking Connect again doesn't pile up connections. Makes a new one (the row, then QuBe Sync's connection with the row's webhook URL, then its `qubeId`, with an optional `name`) when the account has none, or with `new=1`. Redirects (303) to the setup. |
+| `POST quickbooks/connections` | Connect, for the signed-in account. Sends its newest connection that has never connected (`pending` or `setup_cancelled`) back through setup, so clicking Connect again doesn't pile up connections. Makes a new one (the row, then QuBe Sync's connection with the row's webhook URL, then its `qubeId`, with an optional `name`) when the account has none, or with `new=1`. Redirects (303) to the setup. With `simulated=1`, outside production, it connects a simulated company file instead (below). |
 | `POST quickbooks/connections/:id/onboarding` | One of the signed-in account's connections, back through setup, with its webhook URL brought up to date (or made at QuBe Sync, for a row QuBe Sync never answered). Another account's connection answers 404. |
 | `POST webhooks/qube/runs/:id` | A run's webhooks. |
 | `POST webhooks/qube/connections/:id` | A connection's webhooks. |
 | `POST qube/questions/runs/:id` | Your user's answer to the run's question, from `renderQuestion`'s forms. |
 | `GET qube/questions/runs/:id/search` | A record field's matches, as JSON. |
-| `POST qube/runs/:id/retry_start` | A start QuBe Sync never confirmed, sent again with the same reference, from `renderRunStatus`. 409 for a run that isn't `starting`. |
+| `POST qube/runs/:id/retry_start` | A start QuBe Sync never confirmed, sent again with the same reference, from `renderRunStatus`. |
+| `POST qube/runs/:id/redeliver` | A run that looks stuck: asks QuBe Sync to send its latest event again (`redeliverRun`), from `renderRunStatus`'s "Send its latest news again". |
 
-The webhook routes verify the signature (401 if it doesn't check out, logging only its reason),
-answer 404 when the row isn't there, enqueue, and answer 200, or 503 when the enqueue didn't take
-it. Any content type, up to 5 MB (413 beyond). Each id in a URL is only a pointer: the job checks
-the signed event's reference and connection id against the row. The question routes and the start
-retry ask `authorizeQuestion` before anything else; an answer QuBe Sync says has changed (409, or
-any 400) forgets the question and answers 409, and one it can't take (422) says why.
+The webhook routes verify the signature, answer 404 when the row isn't there, enqueue, and answer
+200, or 503 when the enqueue didn't take it. Any content type, up to 5 MB (413 beyond). Each id in
+a URL is only a pointer: the job checks the signed event's reference and connection id against the
+row. A signature that doesn't check out answers 401 and logs its reason, the path and what to
+check, never the secret or the body (`SIGNATURE_HINTS`):
+
+| Reason | What to check |
+| --- | --- |
+| `mismatch` | `QUBE_WEBHOOK_SECRET` (the `webhookSecret` setting) isn't this app's webhook secret: `qube env --write .env` writes it; restart, and QuBe Sync sends it again |
+| `stale` | the signature's time is over 5 minutes from this server's clock: check the clock |
+| `missing`, `malformed` | no `X-Qube-Signature`, or not `t=<seconds>,v1=<hex>`: it isn't from QuBe Sync |
+
+The question routes, the start retry and the redelivery ask `authorizeQuestion` before anything
+else (404 otherwise). What can't go through redirects back to the page (303) with a message for it
+to show once ([below](#run-status-and-questions)): a question that changed (QuBe Sync's 409, or any
+400, which also forgets it: `QUESTION_CHANGED`), an answer QuBe Sync can't take (422: its
+`errors.detail`), a retry of a run that isn't starting (`NOT_STARTING`), and a redelivery that
+isn't due (`NOT_QUIET`), refused (`REDELIVERY_REFUSED[409]`, `[429]`) or unanswered (`NO_ANSWER`).
+A plain 409 or 422 page would show nothing useful to someone who clicked a button.
 
 Passing `config` (what `configure` returns) makes sure the config file is loaded before the routes
 are; a router also takes more settings in its argument. `connect()` and `questions()` parse their
@@ -547,6 +574,18 @@ own forms, after your middleware: if your CSRF protection reads its token from t
 <form method="post" action="/quickbooks/connections">
   <input type="hidden" name="new" value="1"><input type="hidden" name="name" value="Second file">
   <button>Connect another company file</button>
+</form>
+```
+
+To test with no Windows computer, a third button connects a simulated QuickBooks company file:
+a new row whose QuBe Sync connection (`type: "simulated"`) is connected as it's made, so
+`connection.connected` comes at once, and back to the page the button was on rather than to the
+setup. Outside production only: with `NODE_ENV=production` it answers 404, so a customer's user
+can't connect a fake company file.
+
+```html
+<form method="post" action="/quickbooks/connections">
+  <input type="hidden" name="simulated" value="1"><button>Connect a simulated company file</button>
 </form>
 ```
 
@@ -701,13 +740,21 @@ module `npx qubesync workflows` writes at your app's root). It's an object as be
 else changes; run `npx qubesync workflows --check` in CI to keep it current.
 
 `start` takes a connection QuBe Sync has made (it throws `NotConnected` for one with no `qubeId`).
-It writes the run's row first, with a new reference and state `starting`, since a webhook can come
+While the record's last run of the operation on that connection hasn't ended (completed, failed or
+cancelled), it starts nothing new: it resolves to that run, with `run.reused` true, sending its
+start again first when QuBe Sync hasn't confirmed it, with the same reference and input. The
+reference is the Idempotency-Key, so a double click gets the same run back from QuBe Sync, never a
+second invoice; a new reference is made only once the last run has ended. The check and the new row
+(with its input, worked out before the row is written) happen under the connection row's lock
+(`withConnectionLock`), so two starts at once find one row. Otherwise
+it writes the run's row first, with a new reference and state `starting`, since a webhook can come
 before it returns; starts the run with that reference as the idempotency key and
 `QUBE_WEBHOOK_URL/runs/<run id>` as its webhook URL; keeps QuBe Sync's `qubeRunId`, `state`,
 `runUrl` and `cancelUrl`; and resolves to the `Run`. The row keeps the input it sent.
 
 - **Refused** (QuBe Sync answered 4xx) or an input that threw: nothing was started. The row is
-  marked `failed` and the error thrown; start again.
+  `failed` and the error thrown; start again. Not a 409, the reference in use by a call still in
+  flight (the other click of a double click): that start may land, so the run stays `starting`.
 - **No answer** (a timeout, a 5xx, a dropped connection): the run may have started. The row stays
   `starting`, with its reference and input, and the error is thrown. Send it again with
   `await run.retryStart()` (or `CreateInvoice.retryStart(run)`), never with a new `start`: a new
@@ -734,26 +781,116 @@ says it in a sentence: "Added to QuickBooks", "Done", "Failed: <message>", "Canc
 "Waiting for your answer", "Starting", "Not confirmed by QuBe Sync yet" or "Running".
 `run.errorMessage()` and `run.errorDetail()` give the error's parts.
 
-Show the latest run on the record's page:
+Show the record's [sync status](#sync-status) and its run's question on the record's page:
 
 ```js
-const { Run, renderQuestion, renderRunStatus } = require("qubesync/kit");
+const { renderQuestion, renderRunStatus } = require("qubesync/kit");
+const { takeError } = require("qubesync/express");
 
-const run = await Run.latestFor(invoice, "create_invoice");
-const html =
-  renderRunStatus(run, { csrfToken: req.csrfToken() }) +
-  renderQuestion(run, { csrfToken: req.csrfToken(), nonce: res.locals.cspNonce });
+app.get("/invoices/:id", async (req, res) => {
+  const invoice = await Invoice.findByPk(req.params.id);
+  const connection = await currentConnection(req); // the company file the page is about
+  const status = await connection.syncStatus(invoice, "create_invoice");
+  const html =
+    renderRunStatus(status, { csrfToken: req.csrfToken(), error: takeError(req, res) }) +
+    renderQuestion(status, { csrfToken: req.csrfToken(), nonce: res.locals.cspNonce });
+  // ...
+});
 ```
 
-`renderRunStatus(run, { mount, csrfToken, csrfField = "_csrf" })` shows the summary
-(`.qube-run-summary`, inside `.qube-run-status.qube-run-<state>`) and, for a failure, the error's
-detail (`.qube-run-error-detail`); a start unconfirmed for a minute (`run.unconfirmed()`) gets a
-"Try the start again" button posting to `qube/runs/:id/retry_start`. `renderQuestion(run, { mount,
-csrfToken, csrfField, nonce })` shows the run's open question, a form per choice posting to
-`qube/questions/runs/:id`, and a record field's box searching through your app, so the API key
-never reaches the browser. Both return `""` when there's nothing to show, escape every value, and
-use `qube-` classes for your CSS; `mount` is where `questions()` is mounted. For other markup,
-write your own with `escapeHtml` and `SEARCH_SCRIPT`.
+`renderRunStatus(status, { mount, csrfToken, csrfField = "_csrf", error })` shows the summary
+(`.qube-run-summary`, inside `.qube-run-status.qube-sync-<status>.qube-run-<state>`, with
+`data-qube-sync-status`) and, for a failure, the error's detail (`.qube-run-error-detail`), or
+nothing before the record is sent. It takes a `SyncStatus` (or a bare `Run`, read without its
+link). Two buttons post back through `questions()`:
+
+- a start unconfirmed for a minute (`status.unconfirmed`) gets "Try the start again"
+  (`.qube-retry-start`), posting to `qube/runs/:id/retry_start`, which resends it with the same
+  reference;
+- a run that looks stuck (`run.looksStuck()`: QuBe Sync confirmed it, it hasn't ended, nothing has
+  been heard for 10 minutes (`Run.QUIET_AFTER_SECONDS`), and it's running or waiting on a question
+  this app never received) says "No news from QuBe Sync about it for a while."
+  (`.qube-run-quiet`) and gets "Send its latest news again" (`.qube-redeliver`), posting to
+  `qube/runs/:id/redeliver`. That asks QuBe Sync to send the run's latest event again; it comes back
+  through the webhook route as usual, and one this app already applied is skipped by its revision.
+  Its webhook may have been lost while the app was down longer than QuBe Sync's retries.
+
+`renderQuestion(status, { mount, csrfToken, csrfField, nonce, error })` shows the run's open
+question, a form per choice posting to `qube/questions/runs/:id`, and a record field's box
+searching through your app, so the API key never reaches the browser. It takes a `SyncStatus` or a
+`Run`. Both return `""` when there's nothing to show, escape every value, and use `qube-` classes for
+your CSS; `mount` is where `questions()` is mounted. For other markup, write your own with
+`escapeHtml` and `SEARCH_SCRIPT`.
+
+When an answer, a retry or a redelivery can't go through, the route redirects back with a message.
+`takeError(req, res)` (`qubesync/express`) reads it once: from `req.flash` when your app has
+connect-flash, else the session when it has one, else a short-lived `qube_error` cookie (HttpOnly,
+SameSite=Lax, a minute). Pass it as `error` to one of `renderRunStatus` or `renderQuestion`, which
+shows it as `<p class="qube-error">`. Without Express, the kit's functions resolve to
+`{ status: 303, error }` for these; keep the message your own way and show it once.
+
+The page doesn't update itself when the run's next event comes: Node has no standard push to the
+page (qube_rails uses Turbo's page refreshes), so the user reloads to see the next question or the
+ending. A page of your own can poll a route that renders the status, or push it over your app's
+WebSocket from your handlers.
+
+### Sync status
+
+Where one of your records stands with QuickBooks on one connection, for one operation, worked out
+from the kit's rows: its runs and its QuickBooks link. Nothing is stored for it, so it can't go
+stale, and your tables need no status column. Per connection: an invoice can be in one company file
+and not another.
+
+```js
+const status = await connection.syncStatus(invoice, "create_invoice");
+status.status;       // "not_sent", "sending", "needs_answer", "in_quickbooks", "done", "failed" or "cancelled"
+status.qbId;         // its QuickBooks id on this connection, when it's linked
+status.error;        // a failed run's error, else null
+status.retry;        // whether starting it again makes sense
+status.unconfirmed;  // a start QuBe Sync hasn't confirmed for a minute
+status.summaryText;  // "In QuickBooks", or the run's summaryText; null when not sent
+status.run;          // the latest run (a Run), or null
+
+const latest = await SyncStatus.latest(invoice, "create_invoice"); // on the latest run's connection
+```
+
+The run and the link can disagree (a record linked earlier, with a new run since), so the newest
+word wins, in this order:
+
+1. the latest run hasn't ended: `sending` (starting or running, an unconfirmed start too) or
+   `needs_answer` (awaiting input), whatever the link says;
+2. the latest run failed or was cancelled after the link was made (or there's no link): `failed`
+   or `cancelled`;
+3. the record is linked: `in_quickbooks`, always with its `qbId`;
+4. the latest run completed and linked nothing (an operation that doesn't link its record): `done`,
+   which a start may follow;
+5. neither: `not_sent`.
+
+`retry` is true after a failure or a cancellation, unless the record is in QuickBooks on this
+connection anyway (an add sent again would add it twice). While a run is going, a start returns
+that run.
+
+For list pages and filters, a connection writes the SQL condition, one `EXISTS` on the kit's tables
+(by its indexes) per row of your table, comparing your primary key as text:
+
+```js
+const sql = `SELECT * FROM invoices WHERE account_id = $1 AND ${connection.notInQuickbooksSql("invoices", { recordType: "Invoice" })}`;
+```
+
+| Method | Your rows |
+| --- | --- |
+| `inQuickbooksSql(table, options)` | with a QuickBooks link on this connection |
+| `notInQuickbooksSql(table, options)` | without one |
+| `needingAnswerSql(table, { operation, ... })` | whose run of the operation here is waiting for your user's answer |
+| `sendingSql(table, { operation, ... })` | whose run of the operation here is starting or running |
+
+`options`: `recordType` (the type the kit keeps for those records: the `recordType` setting's, by
+default the class name), `primaryKey` (default `"id"`), `dialect` (`"postgres"`, the default,
+`"mysql"` or `"sqlite"`) and, on MySQL, `collation`: the `record_id` column's, when the
+connection's differs ("illegal mix of collations"). `table` may be an alias. The values are checked
+(plain names; `recordType` and `operation` of letters, digits and `_ . : - /`) and inlined, so the
+condition goes into any query builder's raw SQL (`whereRaw`, `Sequelize.literal`). It reads the
+tables `schema.sql` makes, so a store on other tables can't use it.
 
 ### Background work
 
@@ -779,8 +916,9 @@ error ("QuBe Sync: gave up on a webhook ...") and throws. A delivery whose run, 
 has been deleted since isn't retried: `run` logs a warning ("QuBe Sync: dropped ...") and returns.
 
 Without Express, `qubesync/kit` has the routes' work as plain functions: `receiveWebhook`,
-`connectQuickbooks`, `resendOnboarding`, `answerQuestion`, `searchQuestion` and `retryStart`, each
-resolving to the status (and body or location) to answer with.
+`connectQuickbooks`, `resendOnboarding`, `answerQuestion`, `searchQuestion`, `retryStart` and
+`redeliver`, each resolving to the status (and body, location or `error` to go back with) to answer
+with.
 
 ### Storage
 

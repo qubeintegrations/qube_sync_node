@@ -28,6 +28,15 @@ function text(value) {
   return value === null || value === undefined ? null : String(value);
 }
 
+function isRunOf(row, recordType, recordId, operation) {
+  return same(row.recordType, recordType) && same(row.recordId, recordId) && row.operation === String(operation);
+}
+
+// Any connection when none is asked for.
+function isOnConnection(row, connectionId) {
+  return connectionId === undefined || connectionId === null || same(row.connectionId, connectionId);
+}
+
 // Newest first: created_at, then id, both descending.
 function newestFirst(a, b) {
   const byTime = b.createdAt.getTime() - a.createdAt.getTime();
@@ -267,9 +276,10 @@ class MemoryStore {
     return this.#update("runs", id, changes);
   }
 
-  async latestRun(recordType, recordId, operation) {
+  async latestRun(recordType, recordId, operation, options) {
+    const { connectionId } = options || {};
     const rows = [...this.#table("runs").values()]
-      .filter((row) => same(row.recordType, recordType) && same(row.recordId, recordId) && row.operation === String(operation))
+      .filter((row) => isRunOf(row, recordType, recordId, operation) && isOnConnection(row, connectionId))
       .map(loaded)
       .sort(newestFirst);
     return rows[0] || null;

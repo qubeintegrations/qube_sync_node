@@ -1,36 +1,19 @@
 "use strict";
 
-// renderQuestion(run, options) and renderRunStatus(run, options): a record's latest run of an
-// operation, as HTML for the record's page. Find the run with Run.latestFor:
-//
-//   const run = await Run.latestFor(invoice, "create_invoice");
-//   const html = renderRunStatus(run, { csrfToken }) + renderQuestion(run, {
-//     csrfToken: req.csrfToken && req.csrfToken(), // your CSRF protection's
-//     nonce: res.locals.cspNonce, // your Content-Security-Policy's, on the search box's script
-//   });
-//
-// renderQuestion shows the question the run is asking (Operation's question kept it), with a form
-// per choice, or "" when it isn't asking. Each form posts your user's choice to the run's answer
-// route, <mount>/qube/questions/runs/<run id> (the questions router), and a record field's box
-// searches through it too, so the API key never reaches the browser.
-//
-// renderRunStatus says where the run stands, in a sentence (Run#summaryText), and what went wrong
-// when it failed (Run#errorDetail), or "" for no run. A start QuBe Sync hasn't confirmed for a
-// minute gets a "Try the start again" button, posting to <mount>/qube/runs/<run id>/retry_start,
-// which resends it with the same reference.
-//
-// mount is where the questions router is mounted ("" for the app's root). Every value is escaped.
-// csrfToken goes in each form as _csrf (or csrfField). The markup is plain, with qube- classes for
-// your CSS. For other markup, write your own with escapeHtml and SEARCH_SCRIPT: the routes only
-// need the form's fields (choice, data[name]) and the search box's data-qube-search and
-// data-qube-field.
+// renderRunStatus(status, options) and renderQuestion(run, options): a record's sync status and
+// its latest run's question, as HTML for the record's page (README, "Run status and questions").
+// Every value is escaped; the markup is plain, with qube- classes for your CSS. For other markup,
+// write your own with escapeHtml and SEARCH_SCRIPT.
 
-function renderQuestion(run, options) {
-  const { csrfToken, nonce, csrfField = "_csrf", mount = "" } = options || {};
-  const question = run && typeof run.openQuestion === "function" ? run.openQuestion() : null;
-  if (!question) return "";
+const { SyncStatus } = require("./sync-status");
+
+function renderQuestion(runOrStatus, options) {
+  const { csrfToken, nonce, csrfField = "_csrf", mount = "", error = null } = options || {};
+  const run = runOf(runOrStatus);
+  const question = run ? run.openQuestion() : null;
+  if (!question) return errorHtml(error).join("\n");
   const action = `${trimMount(mount)}/qube/questions/runs/${encodeURIComponent(String(run.id))}`;
-  const html = [`<section class="qube-question">`];
+  const html = [...errorHtml(error), `<section class="qube-question">`];
   html.push(`  <p class="qube-question-message">${escapeHtml(question.message)}</p>`);
   const details = question.details || [];
   if (details.length) {
@@ -62,23 +45,57 @@ function renderQuestion(run, options) {
   return html.join("\n");
 }
 
-function renderRunStatus(run, options) {
-  const { csrfToken, csrfField = "_csrf", mount = "", now = new Date() } = options || {};
-  if (!run || typeof run.summaryText !== "function") return "";
-  const state = run.cancelled() ? "cancelled" : run.state;
-  const html = [`<div class="qube-run-status qube-run-${escapeHtml(state)}">`];
-  html.push(`  <p class="qube-run-summary">${escapeHtml(run.summaryText(now))}</p>`);
-  const detail = run.failed() ? run.errorDetail() : null;
+function renderRunStatus(statusOrRun, options) {
+  const { csrfToken, csrfField = "_csrf", mount = "", now = new Date(), error = null } = options || {};
+  const sync = syncOf(statusOrRun, now);
+  const html = errorHtml(error);
+  if (sync.status === "not_sent") return html.join("\n");
+
+  const { run } = sync;
+  const status = escapeHtml(sync.status);
+  const state = run ? ` qube-run-${escapeHtml(run.cancelled() ? "cancelled" : run.state)}` : "";
+  html.push(`<div class="qube-run-status qube-sync-${status}${state}" data-qube-sync-status="${status}">`);
+  html.push(`  <p class="qube-run-summary">${escapeHtml(sync.summaryText)}</p>`);
+  const detail = sync.status === "failed" ? run.errorDetail() : null;
   if (detail) html.push(`  <p class="qube-run-error-detail">${escapeHtml(detail)}</p>`);
-  if (run.unconfirmed(now)) {
-    const action = `${trimMount(mount)}/qube/runs/${encodeURIComponent(String(run.id))}/retry_start`;
-    html.push(`  <form class="qube-retry-start-form" method="post" action="${escapeHtml(action)}">`);
-    html.push(...csrfInput(csrfToken, csrfField));
-    html.push(`    <button type="submit" class="qube-retry-start">Try the start again</button>`);
-    html.push(`  </form>`);
+  const form = { mount, csrfToken, csrfField };
+  if (run && run.looksStuck(now)) {
+    html.push(`  <p class="qube-run-quiet">No news from QuBe Sync about it for a while.</p>`);
+    html.push(...buttonForm(run, "redeliver", "qube-redeliver", "Send its latest news again", form));
   }
+  if (sync.unconfirmed) html.push(...buttonForm(run, "retry_start", "qube-retry-start", "Try the start again", form));
   html.push(`</div>`);
   return html.join("\n");
+}
+
+// A SyncStatus as given, or a bare Run's (no link looked up).
+function syncOf(statusOrRun, now) {
+  if (statusOrRun instanceof SyncStatus) return statusOrRun;
+  return SyncStatus.fromRun(isRun(statusOrRun) ? statusOrRun : null, { now });
+}
+
+function runOf(runOrStatus) {
+  if (runOrStatus instanceof SyncStatus) return runOrStatus.run;
+  return isRun(runOrStatus) ? runOrStatus : null;
+}
+
+function isRun(value) {
+  return Boolean(value) && typeof value.summaryText === "function" && typeof value.openQuestion === "function";
+}
+
+function errorHtml(error) {
+  return error ? [`<p class="qube-error">${escapeHtml(error)}</p>`] : [];
+}
+
+// A one-button form posting to <mount>/qube/runs/<run id>/<action>.
+function buttonForm(run, action, className, label, { mount, csrfToken, csrfField }) {
+  const url = `${trimMount(mount)}/qube/runs/${encodeURIComponent(String(run.id))}/${action}`;
+  return [
+    `  <form class="${className}-form" method="post" action="${escapeHtml(url)}">`,
+    ...csrfInput(csrfToken, csrfField),
+    `    <button type="submit" class="${className}">${label}</button>`,
+    `  </form>`,
+  ];
 }
 
 function trimMount(mount) {

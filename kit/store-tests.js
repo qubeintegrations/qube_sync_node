@@ -9,6 +9,8 @@
 // makeStore is called once per test and resolves to an empty store. Each check is about the
 // store's part (rows, keys, transactions, locks, notifications) and the kit's link rules on top
 // of it, so every store behaves alike. options.describe and options.it replace node:test's.
+// options.query(store, sql) resolves to the rows of a query on the store's database: with it, the
+// sync status SQL conditions are checked too (options.dialect, default "postgres").
 
 const assert = require("assert");
 
@@ -22,6 +24,7 @@ class StoreTestAccount {
 }
 class StoreTestCustomer extends StoreTestAccount {}
 class StoreTestItem extends StoreTestAccount {}
+class StoreTestInvoice extends StoreTestAccount {}
 
 function deferred() {
   let resolve;
@@ -171,6 +174,21 @@ function storeTests(makeStore, options) {
       await withRun(store, connection, { recordType: "Estimate" });
       assert.strictEqual(String((await store.latestRun("Invoice", "7", "create_invoice")).id), String(newest.id));
       assert.strictEqual(await store.latestRun("Invoice", "9", "create_invoice"), null);
+    });
+
+    it("finds a record's newest run of an operation on one connection, with connectionId", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const other = await withConnection(store, { ownerId: "2" });
+      const mine = await withRun(store, connection);
+      await tick();
+      const theirs = await withRun(store, other);
+      const on = (c) => store.latestRun("Invoice", "7", "create_invoice", { connectionId: c.id });
+      assert.strictEqual(String((await on(connection)).id), String(mine.id));
+      assert.strictEqual(String((await on(other)).id), String(theirs.id));
+      assert.strictEqual(String((await store.latestRun("Invoice", "7", "create_invoice", {})).id), String(theirs.id));
+      const third = await withConnection(store, { ownerId: "3" });
+      assert.strictEqual(await on(third), null);
     });
   });
 
@@ -375,6 +393,77 @@ function storeTests(makeStore, options) {
       });
       await store.deleteQuickbooksRecord(made.id);
       assert.deepStrictEqual(await store.findQuickbooksRecords({ connectionId: connection.id, qbId: "80000001-1" }), []);
+    });
+  });
+
+  describe("store: sync status on it", () => {
+    const { SyncStatus } = require("./sync-status");
+
+    async function connectionOn(store, fields) {
+      const { Connection } = require("./records");
+      return new Connection(await withConnection(store, fields), store);
+    }
+
+    it("reads the latest run and the newest link on the connection", async () => {
+      const store = await makeStore();
+      const connection = await connectionOn(store);
+      const elsewhere = await connectionOn(store, { ownerId: "2" });
+      const invoice = new StoreTestInvoice(7);
+      const status = () => SyncStatus.for(connection, invoice, "create_invoice");
+      assert.strictEqual((await status()).status, "not_sent");
+      const run = await withRun(store, connection, { recordType: "StoreTestInvoice", state: "awaiting_input" });
+      await withRun(store, elsewhere, { recordType: "StoreTestInvoice", state: "running" });
+      assert.strictEqual((await status()).status, "needs_answer");
+      await store.updateRun(run.id, { state: "completed", outcome: "added", endedAt: new Date() });
+      await tick();
+      await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+      const linked = await status();
+      assert.deepStrictEqual([linked.status, linked.qbId], ["in_quickbooks", "T1"]);
+      assert.strictEqual((await SyncStatus.for(elsewhere, invoice, "create_invoice")).status, "sending");
+    });
+
+    it("says failed after a link when the latest run failed since", async () => {
+      const store = await makeStore();
+      const connection = await connectionOn(store);
+      const invoice = new StoreTestInvoice(7);
+      await connection.link(invoice, { kind: "invoice", qbId: "T1" });
+      await tick();
+      await withRun(store, connection, { recordType: "StoreTestInvoice", state: "failed", endedAt: new Date(), error: "Refused" });
+      const status = await SyncStatus.for(connection, invoice, "create_invoice");
+      assert.deepStrictEqual([status.status, status.qbId, status.error, status.retry], ["failed", "T1", "Refused", false]);
+    });
+
+    // Only with options.query: a store without SQL (memoryStore) has no database to ask.
+    const sqlIt = options && options.query ? it : () => {};
+    sqlIt("has SQL conditions for list pages, one EXISTS each, on the store's database", async () => {
+      const dialect = options.dialect || "postgres";
+      const store = await makeStore();
+      const query = (sql) => options.query(store, sql);
+      await query("CREATE TABLE IF NOT EXISTS qube_store_test_invoices (id integer PRIMARY KEY)");
+      await query("DELETE FROM qube_store_test_invoices");
+      await query("INSERT INTO qube_store_test_invoices (id) VALUES (1), (2), (3), (4)");
+      const connection = await connectionOn(store);
+      const elsewhere = await connectionOn(store, { ownerId: "2" });
+      await connection.link(new StoreTestInvoice(1), { kind: "invoice", qbId: "T1" });
+      await elsewhere.link(new StoreTestInvoice(2), { kind: "invoice", qbId: "T2" });
+      const run = (id, state, on = connection) => withRun(store, on, { recordType: "StoreTestInvoice", recordId: String(id), state });
+      await run(2, "awaiting_input");
+      await run(3, "running");
+      await run(4, "starting");
+      await run(4, "completed");
+      await run(1, "awaiting_input", elsewhere);
+      const scope = { recordType: "StoreTestInvoice", dialect, operation: "create_invoice" };
+      const ids = async (condition) =>
+        (await query(`SELECT id FROM qube_store_test_invoices WHERE ${condition} ORDER BY id`)).map((row) => Number(row.id));
+      try {
+        assert.deepStrictEqual(await ids(connection.inQuickbooksSql("qube_store_test_invoices", scope)), [1]);
+        assert.deepStrictEqual(await ids(connection.notInQuickbooksSql("qube_store_test_invoices", scope)), [2, 3, 4]);
+        assert.deepStrictEqual(await ids(connection.needingAnswerSql("qube_store_test_invoices", scope)), [2]);
+        assert.deepStrictEqual(await ids(connection.sendingSql("qube_store_test_invoices", scope)), [3, 4]);
+        assert.deepStrictEqual(await ids(elsewhere.needingAnswerSql("qube_store_test_invoices", scope)), [1]);
+      } finally {
+        await query("DROP TABLE qube_store_test_invoices");
+      }
     });
   });
 

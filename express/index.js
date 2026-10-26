@@ -7,7 +7,7 @@
 //   app.use(express.json());
 //   app.use(requireSignIn);    // your sign-in, and your CSRF protection
 //   app.use(connect());        // POST /quickbooks/connections, POST /quickbooks/connections/:id/onboarding
-//   app.use(questions());      // POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start
+//   app.use(questions());      // POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start and /redeliver
 //
 // Each is optional: mount the ones your app uses. The routes are relative to where they're
 // mounted (app.use("/app", connect()) serves POST /app/quickbooks/connections). What they do is
@@ -96,7 +96,8 @@ function webhooks(options) {
       handler(async (req, res) => {
         // No body at all is left unset (Express 5) or {} (Express 4): verify an empty one.
         const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-        const { status } = await kit.receiveWebhook({ kind, id: req.params.id, body, signature: req.get("X-Qube-Signature") });
+        const path = String(req.originalUrl || req.url).split("?")[0];
+        const { status } = await kit.receiveWebhook({ kind, id: req.params.id, body, signature: req.get("X-Qube-Signature"), path });
         res.sendStatus(status);
       }),
       // A body over the limit, refused unread.
@@ -111,8 +112,8 @@ function webhooks(options) {
 }
 
 /**
- * POST /quickbooks/connections, from a "Connect QuickBooks Desktop" button (optional name, and
- * new=1 for another company file), and POST /quickbooks/connections/:id/onboarding, one of the
+ * POST /quickbooks/connections, from a "Connect QuickBooks Desktop" button (optional name, new=1
+ * for another company file, simulated=1 outside production for a simulated one), and POST /quickbooks/connections/:id/onboarding, one of the
  * signed-in account's connections back through setup (404 for another account's): each redirects
  * (303) to QuBe Sync's setup, or answers 401 when currentAccount finds no account. Mount it behind
  * your sign-in and CSRF protection. QuBe Sync's setup doesn't come back to your app: it tells the
@@ -128,35 +129,103 @@ function connect(options) {
     "/quickbooks/connections",
     form,
     handler(async (req, res) => {
-      const result = await kit.connectQuickbooks({ request: req, name: param(req, "name"), another: param(req, "new") === "1" });
-      send(res, result);
+      const result = await kit.connectQuickbooks({
+        request: req,
+        name: param(req, "name"),
+        another: param(req, "new") === "1",
+        simulated: param(req, "simulated") === "1",
+      });
+      send(req, res, result);
     })
   );
   router.post(
     "/quickbooks/connections/:id/onboarding",
     handler(async (req, res) => {
-      send(res, await kit.resendOnboarding({ request: req, id: req.params.id }));
+      send(req, res, await kit.resendOnboarding({ request: req, id: req.params.id }));
     })
   );
   return router;
 }
 
-function send(res, { status, location }) {
+// A kit result: a redirect (303 with no location: back to the page, with its error kept for the
+// page to show once), or a status with its plain-text message.
+function send(req, res, { status, location, error, message }) {
   if (location) return res.redirect(status, location);
+  if (status === 303) {
+    if (error) keepError(req, res, error);
+    return res.redirect(303, back(req));
+  }
+  if (message) return res.status(status).type("text/plain").send(message);
   res.sendStatus(status);
+}
+
+const ERROR_COOKIE = "qube_error";
+const ERROR_KEY = "qubeError";
+const MAX_ERROR_LENGTH = 500;
+
+// connect-flash's req.flash when there is one, else the session, else a short-lived cookie.
+function keepError(req, res, error) {
+  const text = String(error).slice(0, MAX_ERROR_LENGTH);
+  if (typeof req.flash === "function") return req.flash(ERROR_KEY, text);
+  if (hasSession(req)) {
+    req.session[ERROR_KEY] = text;
+    return undefined;
+  }
+  res.cookie(ERROR_COOKIE, text, { path: "/", httpOnly: true, sameSite: "lax", maxAge: 60 * 1000, secure: req.secure });
+  return undefined;
+}
+
+/**
+ * The message a question, retry or redelivery route sent the user back with, or null; taken once,
+ * so pass it to one of renderRunStatus or renderQuestion (their error option).
+ */
+function takeError(req, res) {
+  if (typeof req.flash === "function") {
+    const [first] = req.flash(ERROR_KEY) || [];
+    if (first) return first;
+  }
+  if (hasSession(req) && req.session[ERROR_KEY]) {
+    const text = req.session[ERROR_KEY];
+    delete req.session[ERROR_KEY];
+    return text;
+  }
+  const text = cookieValue(req, ERROR_COOKIE);
+  if (text === null) return null;
+  res.clearCookie(ERROR_COOKIE, { path: "/" });
+  return text === "" ? null : text;
+}
+
+// express-session's, or any session middleware's object.
+function hasSession(req) {
+  return Boolean(req.session) && typeof req.session === "object";
+}
+
+// One cookie from the Cookie header, without cookie-parser.
+function cookieValue(req, name) {
+  const header = req.headers && req.headers.cookie;
+  if (typeof header !== "string") return null;
+  for (const part of header.split(";")) {
+    const at = part.indexOf("=");
+    if (at < 0 || part.slice(0, at).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(at + 1).trim());
+    } catch (_ignored) {
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
  * Your user's answers to a run's questions, from renderQuestion's forms, a record field's search,
- * and a start sent again from renderRunStatus:
+ * and renderRunStatus's buttons:
  *   POST /qube/questions/runs/:id         a choice, with its fields
  *   GET  /qube/questions/runs/:id/search  a record field's matches, as JSON
  *   POST /qube/runs/:id/retry_start       a start QuBe Sync never confirmed, sent again
- * Mount it behind your sign-in and your CSRF protection. Each asks the authorizeQuestion setting
- * before anything else (by default, the signed-in account owns the run's connection): anything but
- * true is a 404, and with neither authorizeQuestion nor currentAccount set it throws NotConfigured,
- * naming the config file (a 500 through your error handler). A question that has changed is a 409. options.limit: the
- * biggest form taken (default Express's 100 kb).
+ *   POST /qube/runs/:id/redeliver         a stuck run's latest event, sent again
+ * Mount it behind your sign-in and your CSRF protection. authorizeQuestion decides who may (404
+ * otherwise). What can't go through redirects back with a message for takeError. options.limit:
+ * the biggest form taken (default Express's 100 kb).
  */
 function questions(options) {
   const express = loadExpress();
@@ -168,9 +237,7 @@ function questions(options) {
     "/qube/questions/runs/:id",
     form,
     handler(async (req, res) => {
-      const result = await kit.answerQuestion({ runId: req.params.id, form: req.body || {}, request: req });
-      if (result.status === 303) return res.redirect(303, back(req));
-      res.status(result.status).type("text/plain").send(result.message);
+      send(req, res, await kit.answerQuestion({ runId: req.params.id, form: req.body || {}, request: req }));
     })
   );
 
@@ -185,9 +252,14 @@ function questions(options) {
   router.post(
     "/qube/runs/:id/retry_start",
     handler(async (req, res) => {
-      const result = await kit.retryStart({ runId: req.params.id, request: req });
-      if (result.status === 303) return res.redirect(303, back(req));
-      res.status(result.status).type("text/plain").send(result.message);
+      send(req, res, await kit.retryStart({ runId: req.params.id, request: req }));
+    })
+  );
+
+  router.post(
+    "/qube/runs/:id/redeliver",
+    handler(async (req, res) => {
+      send(req, res, await kit.redeliver({ runId: req.params.id, request: req }));
     })
   );
   return router;
@@ -204,4 +276,4 @@ function back(req) {
   return "/";
 }
 
-module.exports = { webhooks, connect, questions };
+module.exports = { webhooks, connect, questions, takeError };

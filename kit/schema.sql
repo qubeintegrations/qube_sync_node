@@ -63,6 +63,8 @@ CREATE TABLE qube_runs (
 CREATE UNIQUE INDEX index_qube_runs_on_reference ON qube_runs (reference);
 CREATE INDEX index_qube_runs_on_connection_id ON qube_runs (connection_id);
 CREATE INDEX index_qube_runs_on_record_and_operation ON qube_runs (record_type, record_id, operation, created_at);
+-- For sync status and its list-page conditions (needingAnswerSql, sendingSql).
+CREATE INDEX index_qube_runs_on_connection_record_and_state ON qube_runs (connection_id, record_type, record_id, operation, state);
 
 -- The notifications a run's handler has taken, by delivery_id, so a redelivery runs it once.
 -- Written in the same transaction as the handler, and deleted with the run.
@@ -93,3 +95,5 @@ CREATE TABLE qube_quickbooks_records (
 -- shares a counter, and so do customers, vendors, employees and other names.
 CREATE UNIQUE INDEX index_qube_quickbooks_records_on_qb_id ON qube_quickbooks_records (connection_id, list, qb_id);
 CREATE UNIQUE INDEX index_qube_quickbooks_records_on_record ON qube_quickbooks_records (connection_id, kind, record_type, record_id);
+-- A record's links on a connection whatever their kind: sync status, inQuickbooksSql.
+CREATE INDEX index_qube_quickbooks_records_on_connection_and_record ON qube_quickbooks_records (connection_id, record_type, record_id);

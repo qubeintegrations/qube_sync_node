@@ -44,6 +44,15 @@ function humanize(word) {
   return text === "" ? text : text[0].toUpperCase() + text.slice(1);
 }
 
+// Required when first used: sync-status requires this file.
+function syncStatusModule() {
+  return require("./sync-status");
+}
+
+function unknownSlug(operation) {
+  return new TypeError(`QuBe Sync: no operation has the slug ${JSON.stringify(operation)} (the operations setting)`);
+}
+
 // ---------------------------------------------------------------------------
 
 // One QuickBooks Desktop connection: a company file on a customer's computer, reached through
@@ -111,6 +120,37 @@ class Connection {
     const row = await this.store.updateConnection(this.id, changes);
     if (row) Object.assign(this, row);
     return this;
+  }
+
+  /** record's newest run of operation on this connection, or null. */
+  async latestRun(record, operation) {
+    const [type, id] = recordKey(record);
+    const row = await this.store.latestRun(type, id, String(operation), { connectionId: this.id });
+    return row ? new Run(row, this.store, this) : null;
+  }
+
+  /** Where record stands with QuickBooks here for operation: a SyncStatus, never stored. */
+  async syncStatus(record, operation, options) {
+    if (!settings().operationClass(operation)) throw unknownSlug(operation);
+    return syncStatusModule().SyncStatus.for(this, record, operation, options);
+  }
+
+  // SQL conditions for your list pages (README, "Sync status"): table's rows with a link here,
+  // without one, waiting for an answer, or on their way.
+  inQuickbooksSql(table, options) {
+    return syncStatusModule().inQuickbooksSql(this, table, options);
+  }
+
+  notInQuickbooksSql(table, options) {
+    return syncStatusModule().notInQuickbooksSql(this, table, options);
+  }
+
+  needingAnswerSql(table, options) {
+    return syncStatusModule().needingAnswerSql(this, table, options);
+  }
+
+  sendingSql(table, options) {
+    return syncStatusModule().sendingSql(this, table, options);
   }
 
   // For a row without a qubeId: QuBe Sync's connection made for it, when a create landed but its
@@ -294,6 +334,8 @@ class Run {
     Object.assign(this, row);
     hidden(this, "store", store || settings().store);
     hidden(this, "connection", connection || null);
+    // Set by Operation.start when it returned this run, one that hadn't ended. Not saved.
+    hidden(this, "reused", false);
   }
 
   /** The run with that id, with its connection, or null. */
@@ -312,9 +354,7 @@ class Run {
 
   /** record's newest run of operation (a slug in the operations setting), or null. */
   static async latestFor(record, operation, store) {
-    if (!settings().operationClass(operation)) {
-      throw new TypeError(`QuBe Sync: no operation has the slug ${JSON.stringify(operation)} (the operations setting)`);
-    }
+    if (!settings().operationClass(operation)) throw unknownSlug(operation);
     const using = store || settings().store;
     const [type, id] = recordKey(record);
     const row = await using.latestRun(type, id, String(operation));
@@ -360,6 +400,21 @@ class Run {
   unconfirmed(now = new Date()) {
     const createdAt = toDate(this.createdAt);
     return this.state === "starting" && Boolean(createdAt) && createdAt.getTime() < now.getTime() - Run.UNCONFIRMED_AFTER_SECONDS * 1000;
+  }
+
+  // Confirmed, not ended, quiet for QUIET_AFTER_SECONDS, and running or waiting on a question
+  // this app never received: its webhook may be lost, so the status offers to send it again.
+  looksStuck(now = new Date()) {
+    return this.#quietSince(now.getTime() - Run.QUIET_AFTER_SECONDS * 1000) && (this.state === "running" || this.#questionMissing());
+  }
+
+  #quietSince(ms) {
+    const updatedAt = toDate(this.updatedAt);
+    return !blank(this.qubeRunId) && !this.ended() && Boolean(updatedAt) && updatedAt.getTime() < ms;
+  }
+
+  #questionMissing() {
+    return this.state === "awaiting_input" && !this.openQuestion();
   }
 
   // Where it stands, in one plain sentence for a person: "Added to QuickBooks", "Done",
@@ -427,5 +482,7 @@ class Run {
 Run.ENDED_STATES = Object.freeze(["completed", "failed", "cancelled"]);
 // How long a start may go unconfirmed before the status says so and offers to send it again.
 Run.UNCONFIRMED_AFTER_SECONDS = 60;
+// How long a confirmed run may go without news before the status offers to resend its latest event.
+Run.QUIET_AFTER_SECONDS = 10 * 60;
 
 module.exports = { Connection, Run, recordKey, blank, toDate };

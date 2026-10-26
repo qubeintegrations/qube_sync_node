@@ -14,6 +14,7 @@ const store = require("./store");
 const { memoryStore } = require("./memory-store");
 const { client } = require("./client");
 const { Connection, Run, recordKey } = require("./records");
+const { SyncStatus } = require("./sync-status");
 const { Operation } = require("./operation");
 const { ConnectionEvents } = require("./connection-events");
 const job = require("./job");
@@ -51,6 +52,7 @@ module.exports = {
   Connection,
   Run,
   recordKey,
+  SyncStatus,
   // Bases
   Operation,
   ConnectionEvents,
@@ -60,16 +62,21 @@ module.exports = {
   job: job.job,
   retryWait: job.retryWait,
   MAX_BODY_BYTES: job.MAX_BODY_BYTES,
+  SIGNATURE_HINTS: job.SIGNATURE_HINTS,
   // Onboarding
   connectQuickbooks: onboarding.connectQuickbooks,
   resendOnboarding: onboarding.resendOnboarding,
-  // Questions and the start retry
+  // Questions, the start retry and the redelivery
   QUESTION_CHANGED: questions.QUESTION_CHANGED,
   NOT_STARTING: questions.NOT_STARTING,
+  NOT_QUIET: questions.NOT_QUIET,
+  REDELIVERY_REFUSED: questions.REDELIVERY_REFUSED,
+  NO_ANSWER: questions.NO_ANSWER,
   SEARCH_LIMITS: questions.SEARCH_LIMITS,
   answerQuestion: questions.answerQuestion,
   searchQuestion: questions.searchQuestion,
   retryStart: questions.retryStart,
+  redeliver: questions.redeliver,
   answerData: questions.answerData,
   refusalMessage: questions.refusalMessage,
   // HTML

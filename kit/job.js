@@ -14,6 +14,15 @@ const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
 const KINDS = Object.freeze(["run", "connection"]);
 
+// What to check for each reason a signature is refused, for the developer reading the log.
+const SIGNATURE_HINTS = Object.freeze({
+  mismatch:
+    "it isn't signed with QUBE_WEBHOOK_SECRET (the webhookSecret setting). Set that to this app's webhook secret, which `qube env --write .env` writes, and restart; QuBe Sync sends it again",
+  stale: "its signature's time is over 5 minutes from this server's clock. Check the clock",
+  missing: "it has no X-Qube-Signature header, so it isn't from QuBe Sync",
+  malformed: "its X-Qube-Signature header isn't t=<seconds>,v1=<hex>, so it isn't from QuBe Sync",
+});
+
 /**
  * Receives one QuBe Sync webhook: kind "run" at QUBE_WEBHOOK_URL/runs/<run id>, the URL each run
  * was started with (Run#webhookUrl), or kind "connection" at QUBE_WEBHOOK_URL/connections/<id>,
@@ -25,7 +34,7 @@ const KINDS = Object.freeze(["run", "connection"]);
  * body is the raw request body (a Buffer or string), exactly as received: the signature is over
  * its bytes. No sign-in and no CSRF token: the signature is what proves QuBe Sync sent it.
  */
-async function receiveWebhook({ kind, id, body, signature }) {
+async function receiveWebhook({ kind, id, body, signature, path }) {
   if (isParsed(body)) {
     throw new TypeError(
       "QuBe Sync: the webhook's body was already parsed, so there's nothing left to verify. Give the webhook route the raw body: mount it before any JSON body parser (express.json())."
@@ -50,9 +59,9 @@ async function receiveWebhook({ kind, id, body, signature }) {
       return { status: 400 };
     }
     if (!(err instanceof SignatureError)) throw err;
-    // Its reason (missing, malformed, stale or mismatch) is safe to log: never the secret, the
-    // signature or the body.
-    console.warn(`QuBe Sync: refused a webhook: ${err.reason}`);
+    // The reason and what to check: never the secret, the signature or the body.
+    const where = path || `${kind} ${id}`;
+    console.warn(`QuBe Sync: refused a webhook: ${err.reason} (${where}): ${SIGNATURE_HINTS[err.reason] || "check the signature"}`);
     return { status: 401 };
   }
 
@@ -187,4 +196,4 @@ async function job(delivery, options) {
   }
 }
 
-module.exports = { receiveWebhook, run, job, retryWait, MAX_BODY_BYTES };
+module.exports = { receiveWebhook, run, job, retryWait, MAX_BODY_BYTES, SIGNATURE_HINTS };

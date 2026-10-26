@@ -10,6 +10,9 @@ import {
   Operation,
   Run,
   StoreConflict,
+  SyncStatus,
+  REDELIVERY_REFUSED,
+  SIGNATURE_HINTS,
   asString,
   configure,
   familyFor,
@@ -27,11 +30,13 @@ import type {
   QubeDelivery,
   QuickbooksRecordRow,
   RunRow,
+  SyncStatusName,
   Settings,
   Store,
   WorkflowRunEvent,
 } from "qubesync/kit";
-import { connect, questions, webhooks } from "qubesync/express";
+import { connect, questions, takeError, webhooks } from "qubesync/express";
+import { connectQuickbooks, redeliver, receiveWebhook } from "qubesync/kit";
 import storeTests = require("qubesync/kit/store-tests");
 
 // The app's own records.
@@ -133,6 +138,30 @@ async function page(invoice: Invoice, account: Account, csrfToken: string): Prom
   return [html, sentence, family, qbId, linked && linked.name, started.reference].join("");
 }
 
+// A record's page and its list page, with the sync status.
+app.get("/invoices/:id", async (req, res) => {
+  const invoice = new Invoice(Number(req.params.id), "1001", null);
+  const [connection] = await Connection.ownedBy(new Account(1, "Riverbend"));
+  const sync: SyncStatus = await connection.syncStatus(invoice, "create_invoice");
+  const name: SyncStatusName = sync.status;
+  const qbId: string | null = sync.qbId;
+  const retry: boolean = sync.retry || sync.unconfirmed;
+  const latest = await SyncStatus.latest(invoice, "create_invoice");
+  const stuck: boolean = latest.run !== null && latest.run.looksStuck();
+  const reused: boolean = (await CreateInvoice.start(invoice, connection)).reused;
+  const error: string | null = takeError(req, res);
+  const where: string = connection.inQuickbooksSql("invoices", { recordType: "Invoice" }) + connection.sendingSql("invoices", { recordType: "Invoice", operation: "create_invoice", dialect: "mysql" });
+  res.send(renderRunStatus(sync, { error }) + renderQuestion(sync) + name + qbId + retry + stuck + reused + where + REDELIVERY_REFUSED[409] + SIGNATURE_HINTS.stale);
+});
+
+async function routes(req: Request): Promise<number> {
+  const simulated = await connectQuickbooks({ request: req, simulated: true });
+  const again = await redeliver({ runId: "1", request: req });
+  const refused = await receiveWebhook({ kind: "run", id: "1", body: "", signature: null, path: "/webhooks/qube/runs/1" });
+  return simulated.status + again.status + refused.status + ("error" in again && again.error ? 1 : 0);
+}
+void routes;
+
 async function worker(delivery: QubeDelivery) {
   try {
     await run(delivery);
@@ -147,11 +176,12 @@ async function worker(delivery: QubeDelivery) {
 // A store of the app's own, checked by the suite.
 async function rows(s: Store): Promise<[ConnectionRow | null, RunRow | null]> {
   const connection = await s.getConnection("1");
-  const latest = await s.latestRun("Invoice", "7", "create_invoice");
+  const latest = await s.latestRun("Invoice", "7", "create_invoice", { connectionId: "1" });
   await s.withRunLock("1", async (tx, row) => (row ? tx.once(row.id, "d-1", async () => undefined) : false));
   return [connection, latest];
 }
 storeTests(async () => memoryStore());
+storeTests(async () => memoryStore(), { dialect: "sqlite", query: async (_store, sql) => [{ sql }] });
 
 void page;
 void worker;

@@ -185,8 +185,8 @@ export interface Store {
   createRun(fields: NewRun): Promise<RunRow>;
   getRun(id: RowId): Promise<RunRow | null>;
   updateRun(id: RowId, changes: Partial<RunRow>): Promise<RunRow | null>;
-  /** A record's newest run of an operation (createdAt, then id, descending), or null. */
-  latestRun(recordType: string, recordId: string, operation: string): Promise<RunRow | null>;
+  /** A record's newest run of an operation (createdAt, then id, descending), or null; with connectionId, on that connection only. */
+  latestRun(recordType: string, recordId: string, operation: string, options?: { connectionId?: RowId }): Promise<RunRow | null>;
   /** fn in a transaction holding the run row's lock, with the row as it is now (null when there's none). Re-entrant within its transaction. */
   withRunLock<T>(id: RowId, fn: (tx: Store, row: RunRow | null) => Promise<T>): Promise<T>;
 
@@ -347,6 +347,26 @@ export interface LinkOptions {
   name?: string | null;
 }
 
+/** The SQL a list page's condition is written for. */
+export type SqlDialect = "postgres" | "mysql" | "sqlite";
+
+/** Which of your tables a sync status SQL condition is about. */
+export interface SyncSqlOptions {
+  /** The type the kit keeps for its records (the recordType setting's: by default the class name). */
+  recordType: string;
+  /** Its primary key column. Default "id". */
+  primaryKey?: string;
+  /** Default "postgres". */
+  dialect?: SqlDialect;
+  /** MySQL: the record_id column's collation, when the connection's differs. */
+  collation?: string | null;
+}
+
+export interface SyncRunSqlOptions extends SyncSqlOptions {
+  /** The operation's slug. */
+  operation: string;
+}
+
 /** One QuickBooks Desktop connection (a company file): a qube_connections row with what it means. */
 export declare class Connection implements ConnectionRow {
   /** Clock difference allowed between this app and QuBe Sync, for adoption. */
@@ -381,6 +401,18 @@ export declare class Connection implements ConnectionRow {
   owner<A = any>(): Promise<A>;
   /** Writes changes to its row, and takes the row as written. */
   update(changes: Partial<ConnectionRow>): Promise<this>;
+  /** record's newest run of operation on this connection, or null. */
+  latestRun(record: QubeRecord, operation: string): Promise<Run | null>;
+  /** Where record stands with QuickBooks here for operation, worked out from its runs and its link. Throws for a slug the operations setting doesn't have. */
+  syncStatus(record: QubeRecord, operation: string, options?: { now?: Date }): Promise<SyncStatus>;
+  /** `EXISTS (...)`: table's rows with a QuickBooks link on this connection. For a WHERE clause; values are inlined, checked. */
+  inQuickbooksSql(table: string, options: SyncSqlOptions): string;
+  /** `NOT EXISTS (...)`: table's rows with no link on this connection. */
+  notInQuickbooksSql(table: string, options: SyncSqlOptions): string;
+  /** table's rows whose run of options.operation here is waiting for an answer. */
+  needingAnswerSql(table: string, options: SyncRunSqlOptions): string;
+  /** table's rows whose run of options.operation here is starting or running. */
+  sendingSql(table: string, options: SyncRunSqlOptions): string;
   /** For a row without a qubeId: QuBe Sync's connection made for it, adopted and saved, or null. */
   adoptQubeConnection(): Promise<string | null>;
   /** Keeps record's QuickBooks id for kind; an id linked to another record moves (logged). */
@@ -397,6 +429,8 @@ export declare class Connection implements ConnectionRow {
 export declare class Run implements RunRow {
   static ENDED_STATES: readonly string[];
   static UNCONFIRMED_AFTER_SECONDS: number;
+  /** How long a confirmed run may go quiet before looksStuck: 600. */
+  static QUIET_AFTER_SECONDS: number;
   /** The run with that id, with its connection, or null. */
   static get(id: RowId, store?: Store): Promise<Run | null>;
   /** A row from the store, with its connection. */
@@ -407,6 +441,8 @@ export declare class Run implements RunRow {
   constructor(row: RunRow, store?: Store, connection?: Connection | null);
   readonly store: Store;
   readonly connection: Connection;
+  /** True when Operation.start returned this run, one that hadn't ended, rather than starting another. */
+  reused: boolean;
 
   id: RowId;
   connectionId: RowId;
@@ -440,12 +476,47 @@ export declare class Run implements RunRow {
   cancelled(): boolean;
   /** Still "starting" a minute after it was written. */
   unconfirmed(now?: Date): boolean;
+  /** Confirmed, not ended, quiet for 10 minutes, and running or awaiting a question this app never received. */
+  looksStuck(now?: Date): boolean;
   /** "Added to QuickBooks", "Done", "Failed: <message>", "Cancelled: <reason>", "Waiting for your answer", "Starting", "Not confirmed by QuBe Sync yet" or "Running". */
   summaryText(now?: Date): string;
   cancelReasonText(): string;
   errorMessage(): string | null;
   errorDetail(): string | null;
   openQuestion(): QubePrompt | null;
+}
+
+/** not_sent, sending, needs_answer, in_quickbooks, done, failed or cancelled. */
+export type SyncStatusName = "not_sent" | "sending" | "needs_answer" | "in_quickbooks" | "done" | "failed" | "cancelled";
+
+/** Where a record stands with QuickBooks on one connection for one operation: derived from its runs and its link, never stored. */
+export declare class SyncStatus {
+  static readonly STATUSES: readonly SyncStatusName[];
+  /** record's status on connection for operation (a slug). */
+  static for(connection: Connection, record: QubeRecord, operation: string, options?: { now?: Date }): Promise<SyncStatus>;
+  /** record's status on the connection its latest run of operation went out on; not_sent with no run. */
+  static latest(record: QubeRecord, operation: string, options?: { now?: Date; store?: Store }): Promise<SyncStatus>;
+  /** A run's status with no link looked up. */
+  static fromRun(run: Run | null | undefined, options?: { now?: Date }): SyncStatus;
+
+  constructor(status: SyncStatusName, run: Run | null, link: QuickbooksRecordRow | null, now?: Date);
+  readonly status: SyncStatusName;
+  /** The latest run, or null. */
+  readonly run: Run | null;
+  /** The record's newest link on the connection, or null. */
+  readonly link: QuickbooksRecordRow | null;
+  /** The record's QuickBooks id here when it's linked (always, for in_quickbooks). */
+  readonly qbId: string | null;
+  /** A failed run's error, as its event carried it. */
+  readonly error: unknown;
+  /** Failed or cancelled, and not linked: starting again makes sense. */
+  readonly retry: boolean;
+  /** Sending, with a start QuBe Sync hasn't confirmed for a minute. */
+  readonly unconfirmed: boolean;
+  /** In a sentence for a person ("In QuickBooks", or the run's summaryText), or null when not_sent. */
+  readonly summaryText: string | null;
+  toString(): SyncStatusName;
+  toJSON(): { status: SyncStatusName; qbId: string | null; error: unknown; retry: boolean; unconfirmed: boolean; summaryText: string | null };
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +544,10 @@ export declare class Operation<R extends QubeRecord = QubeRecord> {
   static workflow: string;
   /** Its key in the operations setting, kept on each run. */
   static slug: string;
-  /** Writes the run ("starting"), starts it on the connection, keeps QuBe Sync's answer; resolves to the run. */
+  /**
+   * Writes the run ("starting"), starts it on the connection, keeps QuBe Sync's answer; resolves to the run. While the
+   * record's last run of the operation on that connection hasn't ended, resolves to that run instead (run.reused).
+   */
   static start<R extends QubeRecord>(this: new (record: R, run: Run) => Operation<R>, record: R, connection: Connection | ConnectionRow): Promise<Run>;
   /** Sends a start that got no answer again, with the same reference; a run already answered is returned as it is. */
   static retryStart(run: Run): Promise<Run>;
@@ -541,7 +615,12 @@ export interface ReceiveWebhookInput {
   body: string | Uint8Array | null | undefined;
   /** The X-QUBE-Signature header. */
   signature: string | readonly string[] | null | undefined;
+  /** The request's path, for the log line of a refused signature. */
+  path?: string | null;
 }
+
+/** What a refused signature's log line says to check, by reason. */
+export declare const SIGNATURE_HINTS: Readonly<Record<"missing" | "malformed" | "stale" | "mismatch", string>>;
 
 /** The largest webhook body taken: 5 MB. */
 export declare const MAX_BODY_BYTES: number;
@@ -559,13 +638,34 @@ export interface Redirect {
   location: string;
 }
 
-/** POST quickbooks/connections: the account's never-connected connection back through setup, or a new one (another: true). */
-export declare function connectQuickbooks(input: { request: any; name?: string | null; another?: boolean }): Promise<Redirect | { status: 401 }>;
+/** Back to the page the request came from, with a message for it to show once when error is set. */
+export interface BackToPage {
+  status: 303;
+  error?: string;
+}
+
+/**
+ * POST quickbooks/connections: the account's never-connected connection back through setup, or a new one (another:
+ * true). simulated: true, outside production (NODE_ENV), connects a simulated company file and goes back to the page;
+ * in production, 404.
+ */
+export declare function connectQuickbooks(input: {
+  request: any;
+  name?: string | null;
+  another?: boolean;
+  simulated?: boolean;
+}): Promise<Redirect | { status: 303 } | { status: 401 | 404 }>;
 /** POST quickbooks/connections/:id/onboarding: one of the account's connections back through setup. */
 export declare function resendOnboarding(input: { request: any; id: RowId }): Promise<Redirect | { status: 401 | 404 }>;
 
 export declare const QUESTION_CHANGED: string;
 export declare const NOT_STARTING: string;
+/** redeliver's message for a run that doesn't look stuck. */
+export declare const NOT_QUIET: string;
+/** redeliver's messages for QuBe Sync's 409 (nothing to send yet) and 429 (asked too soon). */
+export declare const REDELIVERY_REFUSED: Readonly<{ 409: string; 429: string }>;
+/** redeliver's message when QuBe Sync didn't answer. */
+export declare const NO_ANSWER: string;
 export declare const SEARCH_LIMITS: { readonly minQuery: number; readonly maxQuery: number; readonly maxField: number };
 
 export interface SearchMatch {
@@ -575,15 +675,20 @@ export interface SearchMatch {
   [key: string]: any;
 }
 
-/**
- * { status: 303 } once answered; else { status, message } (plain text):
- * (logged), 404 not found or not allowed, 409 the question changed, 422 a field refused.
- */
-export declare function answerQuestion(input: { runId: RowId; form: Record<string, unknown>; request: any }): Promise<{ status: number; message?: string }>;
+/** Not there, or authorizeQuestion said no. */
+export interface NotFound {
+  status: 404;
+  message: string;
+}
+
+/** { status: 303 } once answered; { status: 303, error } when the question changed or a field was refused; or 404. */
+export declare function answerQuestion(input: { runId: RowId; form: Record<string, unknown>; request: any }): Promise<BackToPage | NotFound>;
 /** { status, json }: 200 with the matches ([] outside the bounds), 404 [], 409 [] no longer searching, QuBe Sync's 4xx with []. */
 export declare function searchQuestion(input: { runId: RowId; field: unknown; q: unknown; request: any }): Promise<{ status: number; json: SearchMatch[] }>;
-/** { status: 303 } once sent (or refused, or unanswered again); else { status, message }: 404, 409 not starting. With authorizeQuestion and currentAccount unset, throws NotConfigured. */
-export declare function retryStart(input: { runId: RowId; request: any }): Promise<{ status: number; message?: string }>;
+/** { status: 303 } once sent (or refused, or unanswered again); { status: 303, error: NOT_STARTING }; or 404. */
+export declare function retryStart(input: { runId: RowId; request: any }): Promise<BackToPage | NotFound>;
+/** A stuck run's latest event sent again (Client#redeliverRun): { status: 303 }, { status: 303, error }, or 404. */
+export declare function redeliver(input: { runId: RowId; request: any }): Promise<BackToPage | NotFound>;
 /** The choice's fields from the form, each as its type. */
 export declare function answerData(choice: QubeChoice, form: Record<string, unknown>): Record<string, unknown>;
 /** What QuBe Sync said was wrong with an answer (its errors.detail). */
@@ -599,6 +704,8 @@ export interface RenderOptions {
   csrfToken?: string | null;
   /** The token's form field. Default "_csrf". */
   csrfField?: string;
+  /** A message to show once, above it (takeError's, from qubesync/express). */
+  error?: string | null;
 }
 
 export interface RenderQuestionOptions extends RenderOptions {
@@ -612,9 +719,12 @@ export interface RenderRunStatusOptions extends RenderOptions {
 }
 
 /** The run's open question as HTML (every value escaped), with a form per choice; "" when it isn't asking. */
-export declare function renderQuestion(run: Run | null | undefined, options?: RenderQuestionOptions): string;
-/** Where the run stands, a failure's detail, and a retry button for an unconfirmed start; "" for no run. */
-export declare function renderRunStatus(run: Run | null | undefined, options?: RenderRunStatusOptions): string;
+export declare function renderQuestion(run: Run | SyncStatus | null | undefined, options?: RenderQuestionOptions): string;
+/**
+ * The record's sync status in a sentence, a failure's detail, and buttons for a stuck run ("Send its latest news again")
+ * and an unconfirmed start; "" when not sent. A bare Run is read without its link.
+ */
+export declare function renderRunStatus(status: SyncStatus | Run | null | undefined, options?: RenderRunStatusOptions): string;
 export declare function escapeHtml(value: unknown): string;
 /** The search box's script, for markup of your own. */
 export declare const SEARCH_SCRIPT: string;

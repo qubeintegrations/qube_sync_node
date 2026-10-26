@@ -1,10 +1,13 @@
 "use strict";
 
 // Your user's answers to the questions a run asks, from renderQuestion's forms on the record's
-// page, a record field's search, and a start sent again from renderRunStatus:
+// page, a record field's search, and renderRunStatus's buttons:
 //   POST <mount>/qube/questions/runs/<run id>         a choice, with its fields
 //   GET  <mount>/qube/questions/runs/<run id>/search  a record field's matches, as JSON
 //   POST <mount>/qube/runs/<run id>/retry_start       a start QuBe Sync never confirmed, again
+//   POST <mount>/qube/runs/<run id>/redeliver         a stuck run's latest event, sent again
+// What can't go through goes back to the page with { status: 303, error }: the adapter keeps
+// the message for the page to show once (renderRunStatus's error option).
 // Each finds the run, its operation (the operations setting) and its record, as the webhooks do,
 // and asks authorizeQuestion(request, record, run) before anything is sent: by default, whether
 // the signed-in account owns the run's connection. The calls to QuBe Sync are made here, with the
@@ -17,6 +20,12 @@ const { settings } = require("./settings");
 
 const QUESTION_CHANGED = "This question has changed; reload.";
 const NOT_STARTING = "This run isn't waiting for its start to be confirmed.";
+const NOT_QUIET = "QuBe Sync has been heard from about this run lately: nothing to ask for.";
+const REDELIVERY_REFUSED = Object.freeze({
+  409: "QuBe Sync has no news about this run to send yet.",
+  429: "That was asked a moment ago: give it a minute.",
+});
+const NO_ANSWER = "QuBe Sync didn't answer: try again in a minute.";
 const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100 });
 
 // The run a request names, with its operation and its record, once authorizeQuestion says true,
@@ -43,15 +52,11 @@ async function authorizedRun(runId, request, action) {
 }
 
 /**
- * Posts your user's choice, with what they filled in for its fields, to the question's
- * links.decisions. Resolves to { status: 303 } once it's in (send them back to the page), or
- * { status, message } (plain text) when it isn't: 404 for a
- * run that isn't there or authorizeQuestion doesn't allow, 409 when the question has changed, 422
- * when QuBe Sync couldn't take a field. The question is forgotten once it's answered, or once
- * QuBe Sync says it was answered or asked again since (a 409, or a 400 such as
- * not_awaiting_input); the run's next webhook says what came of it.
- *
- * form is the posted form: choice, and the choice's fields as data[name] (nested or not).
+ * Posts your user's choice, with its fields, to the question's links.decisions. Resolves to
+ * { status: 303 } (back to the page), { status: 303, error } when it can't go through (the
+ * question changed: QUESTION_CHANGED; a field refused: refusalMessage), or { status: 404,
+ * message }. A question QuBe Sync says was answered or asked again since (a 409, or a 400) is
+ * forgotten. form is the posted form: choice, and data[name] (nested or not).
  */
 async function answerQuestion({ runId, form, request }) {
   const { status, found } = await authorizedRun(runId, request, "an answer");
@@ -60,7 +65,7 @@ async function answerQuestion({ runId, form, request }) {
   const links = found.run.links || {};
   const sent = form || {};
   const choice = ((question && question.choices) || []).find((c) => c.id === sent.choice);
-  if (!choice || !links.decisions) return { status: 409, message: QUESTION_CHANGED };
+  if (!choice || !links.decisions) return back(QUESTION_CHANGED);
 
   try {
     await client().answer(links.decisions, { choice: choice.id, data: answerData(choice, sent) });
@@ -68,10 +73,10 @@ async function answerQuestion({ runId, form, request }) {
     const refused = err instanceof APIError ? err.status : 0;
     if (![400, 409, 422].includes(refused)) throw err;
     // A field QuBe Sync couldn't take: its errors.detail says which.
-    if (refused === 422) return { status: 422, message: refusalMessage(err) };
+    if (refused === 422) return back(refusalMessage(err));
 
     await found.operation.answered(question.token);
-    return { status: 409, message: QUESTION_CHANGED };
+    return back(QUESTION_CHANGED);
   }
   await found.operation.answered(question.token);
   return { status: 303 };
@@ -111,16 +116,13 @@ function isSearchable(query, name) {
 
 /**
  * Sends a start QuBe Sync never confirmed (a run still "starting") again, with the same reference
- * as its Idempotency-Key (Run#retryStart), so a start that did land answers with its run rather
- * than making another. authorizeQuestion decides who may, as for answering the run's questions.
- * Resolves to { status: 303 } (send them back to the page, whose status says how it went), or
- * { status, message }: 404 for a run that isn't there or isn't
- * allowed, 409 for one that isn't starting.
+ * (Run#retryStart). Resolves to { status: 303 } (the page's status says how it went),
+ * { status: 303, error: NOT_STARTING } for a run that isn't starting, or { status: 404, message }.
  */
 async function retryStart({ runId, request }) {
   const { status, found } = await authorizedRun(runId, request, "a start retry");
   if (!found) return { status, message: "Not found" };
-  if (found.run.state !== "starting") return { status: 409, message: NOT_STARTING };
+  if (found.run.state !== "starting") return back(NOT_STARTING);
 
   try {
     await found.run.retryStart();
@@ -131,6 +133,33 @@ async function retryStart({ runId, request }) {
     console.warn(`QuBe Sync: run ${found.run.id}'s start retry didn't go through (${err.name}${err.code ? ` ${err.code}` : ""})`);
   }
   return { status: 303 };
+}
+
+/**
+ * Asks QuBe Sync to send a stuck run's latest event (Run#looksStuck) again, to the run's webhook
+ * URL: renderRunStatus's "Send its latest news again". Resolves to { status: 303 }, { status: 303,
+ * error } (not stuck: NOT_QUIET; refused: REDELIVERY_REFUSED[409 or 429]; no answer: NO_ANSWER),
+ * or { status: 404, message }.
+ */
+async function redeliver({ runId, request }) {
+  const { status, found } = await authorizedRun(runId, request, "a redelivery");
+  if (!found) return { status, message: "Not found" };
+  const { run } = found;
+  if (!run.looksStuck()) return back(NOT_QUIET);
+
+  try {
+    await client().redeliverRun(run.connection.qubeId, run.qubeRunId);
+  } catch (err) {
+    if (err instanceof APIError && REDELIVERY_REFUSED[err.status]) return back(REDELIVERY_REFUSED[err.status]);
+    if (isNoAnswer(err)) return back(NO_ANSWER);
+    throw err;
+  }
+  return { status: 303 };
+}
+
+// Back to the page, with a message for it to show once.
+function back(error) {
+  return { status: 303, error };
 }
 
 /**
@@ -172,11 +201,15 @@ function refusalMessage(err) {
 module.exports = {
   QUESTION_CHANGED,
   NOT_STARTING,
+  NOT_QUIET,
+  REDELIVERY_REFUSED,
+  NO_ANSWER,
   SEARCH_LIMITS,
   authorizedRun,
   answerQuestion,
   searchQuestion,
   retryStart,
+  redeliver,
   answerData,
   refusalMessage,
 };

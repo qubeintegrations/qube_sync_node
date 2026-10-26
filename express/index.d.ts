@@ -1,6 +1,6 @@
 // Type definitions for qubesync/express: QuBe Sync's integration kit for Express 4 and 5.
 
-import type { Router } from "express";
+import type { Request, Response, Router } from "express";
 import type { Settings, SettingsOptions } from "../kit/index";
 
 /** The router's own options; any other key is a setting, passed to configure first. */
@@ -19,14 +19,21 @@ export interface QuestionsOptions {
 export declare function webhooks(options?: SettingsOptions | Settings): Router;
 
 /**
- * POST /quickbooks/connections (name, new=1) and POST /quickbooks/connections/:id/onboarding: 303
+ * POST /quickbooks/connections (name, new=1, simulated=1 outside production) and POST /quickbooks/connections/:id/onboarding: 303
  * to the setup, 401 with no signed-in account, 404 for another account's connection. Mount it
  * behind your sign-in.
  */
 export declare function connect(options?: SettingsOptions | Settings): Router;
 
 /**
- * POST /qube/questions/runs/:id, GET .../search and POST /qube/runs/:id/retry_start: 404 when authorizeQuestion refuses, 409 when the question (or the start) has
- * changed. Mount it behind your sign-in and CSRF protection.
+ * POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start and POST /qube/runs/:id/redeliver: 404
+ * when authorizeQuestion refuses; what can't go through redirects back with a message for takeError. Mount it behind
+ * your sign-in and CSRF protection.
  */
 export declare function questions(options?: RouterOptions<QuestionsOptions> | Settings): Router;
+
+/**
+ * The message a route sent the user back with (kept in req.flash, the session, or a cookie), or null. Taken once: pass
+ * it to renderRunStatus or renderQuestion as error.
+ */
+export declare function takeError(req: Request, res: Response): string | null;

@@ -28,10 +28,15 @@ const NEVER_CONNECTED = Object.freeze(["pending", "setup_cancelled"]);
  *
  * Resolves to { status: 303, location } (the setup page), or { status: 401 } when currentAccount
  * finds no signed-in account.
+ *
+ * simulated: true (simulated=1), outside production (NODE_ENV), connects a simulated company file
+ * on a new row instead, connected as it's made, and resolves to { status: 303 }: back to the page.
+ * In production it's { status: 404 }.
  */
-async function connectQuickbooks({ request, name, another = false } = {}) {
+async function connectQuickbooks({ request, name, another = false, simulated = false } = {}) {
   const account = await signedInAccount(request, "a connect");
   if (!account) return { status: 401 };
+  if (simulated) return connectSimulated(account, name);
 
   if (!another) {
     // Newest first, as the store lists them.
@@ -57,6 +62,16 @@ async function resendOnboarding({ request, id } = {}) {
   if (!connection || !isOwnedBy(connection, account)) return { status: 404 };
 
   return sendToSetup(connection);
+}
+
+// Never in production: a customer's user can't connect a fake company file.
+async function connectSimulated(account, name) {
+  if (process.env.NODE_ENV === "production") return { status: 404 };
+
+  const connection = await Connection.create(account, { name: connectionName(name) });
+  const made = await client().createConnection({ webhookUrl: connection.webhookUrl(), name: connection.name || undefined, type: "simulated" });
+  await connection.update({ qubeId: String(made.id) });
+  return { status: 303 };
 }
 
 async function signedInAccount(request, what) {
