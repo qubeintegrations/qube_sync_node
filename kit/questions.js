@@ -1,80 +1,88 @@
 "use strict";
 
 // Your user's answers to the questions a run asks, from renderQuestion's forms on the record's
-// page, and a record field's search:
-//   POST <mount>/qube/questions/<operation>/<record id>         a choice, with its fields
-//   GET  <mount>/qube/questions/<operation>/<record id>/search  a record field's matches, as JSON
-// Each finds the record through the operations setting, as the webhooks do, and asks the
-// authorizeQuestion setting before anything else. The calls to QuBe Sync are made here, with the
+// page, a record field's search, and a start sent again from renderRunStatus:
+//   POST <mount>/qube/questions/runs/<run id>         a choice, with its fields
+//   GET  <mount>/qube/questions/runs/<run id>/search  a record field's matches, as JSON
+//   POST <mount>/qube/runs/<run id>/retry_start       a start QuBe Sync never confirmed, again
+// Each finds the run, its operation (the operations setting) and its record, as the webhooks do,
+// and asks authorizeQuestion(request, record, run) before anything is sent: by default, whether
+// the signed-in account owns the run's connection. The calls to QuBe Sync are made here, with the
 // API key, so the browser only ever talks to your app.
 
 const { APIError } = require("../client");
-const { client } = require("./client");
-const { refuseUnauthorized, settings } = require("./settings");
+const { client, isNoAnswer } = require("./client");
+const { Run } = require("./records");
+const { CONFIG_FILE, settings } = require("./settings");
 
 const QUESTION_CHANGED = "This question has changed; reload.";
-const FORBIDDEN = "QuBe Sync: the authorizeQuestion setting isn't set, so every answer is refused.";
+const NOT_STARTING = "This run isn't waiting for its start to be confirmed.";
+const FORBIDDEN = "QuBe Sync: neither authorizeQuestion nor currentAccount is set, so every answer is refused.";
 const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100 });
 
-// The operation the URL names, with its record, once the signed-in user may act on it, and the
-// question saved there, as { found }; else { status }: 404 for a slug none of your operations has
-// (the connection's own events ask nothing), a record that isn't found, or one authorizeQuestion
-// doesn't allow, and 403 (logged) while authorizeQuestion isn't set, a setup mistake to see.
-async function lookup(operation, recordId, request) {
-  if (typeof operation !== "string") return { status: 404 };
-  const operations = settings().operations;
-  if (!operations.has(operation)) return { status: 404 };
-  const OperationClass = operations.get(operation);
-  const record = await OperationClass.findRecord(String(recordId));
-  if (record === null || record === undefined) return { status: 404 };
-  const authorize = settings().authorizeQuestion;
-  // Only true allows: anything else (a record, a count, a Promise left unawaited) is refused.
-  const allowed = await authorize(request, record, operation);
-  if (authorize === refuseUnauthorized) return { status: 403 };
+// The run a request names, with its operation and its record, once authorizeQuestion says true,
+// as { found: { run, operation, record } }; else { status }. Only true lets it through: a truthy
+// record, or a forgotten return, doesn't. A refusal answers as a run that doesn't exist does
+// (404), so a user can't tell another customer's run is there. The run's id comes from the URL,
+// so this is what keeps one customer's users off another's runs.
+//
+// The default policy needs currentAccount: with neither it nor authorizeQuestion set, nobody can
+// be allowed, so the answer is 403, logged, a setup mistake to see.
+async function authorizedRun(runId, request, action) {
+  const run = await Run.get(String(runId));
+  const OperationClass = run ? settings().operationClass(run.operation) : null;
+  const record = OperationClass ? await OperationClass.recordFor(run) : null;
+  if (record === null) return { status: 404 };
+
+  if (!hasPolicy()) {
+    console.warn(
+      `QuBe Sync: refused ${action} for run ${run.id}: neither authorizeQuestion nor currentAccount is set. Set currentAccount (or authorizeQuestion) with configure(...) in ${CONFIG_FILE}.`
+    );
+    return { status: 403 };
+  }
+  const allowed = await settings().authorizeQuestion(request, record, run);
   if (allowed !== true) {
-    if (typeof allowed !== "boolean") {
-      console.warn(`QuBe Sync: refused ${operation} ${record.id}: authorizeQuestion returned ${allowed === null ? "null" : typeof allowed}, not true or false`);
-    }
+    console.warn(`QuBe Sync: refused ${action} for run ${run.id}: authorizeQuestion said no`);
     return { status: 404 };
   }
-  const instance = new OperationClass(record);
-  const question = await instance.savedQuestion();
-  return { found: { operation: instance, question, links: (await instance.savedLinks()) || {} } };
+
+  return { found: { run, operation: new OperationClass(record, run), record } };
 }
 
-// The same, as the question or null whichever the refusal.
-async function findQuestion(operation, recordId, request) {
-  const { found } = await lookup(operation, recordId, request);
-  return found || null;
+// authorizeQuestion is set, or its default has currentAccount to go on.
+function hasPolicy() {
+  const current = settings();
+  return current.isSet("authorizeQuestion") || current.isSet("currentAccount");
 }
 
 /**
  * Posts your user's choice, with what they filled in for its fields, to the question's
  * links.decisions. Resolves to { status: 303 } once it's in (send them back to the page), or
- * { status, message } (plain text) when it isn't: 403 while the authorizeQuestion setting isn't
- * set (logged), 404 for a record that isn't found or authorizeQuestion doesn't allow, 409 when the
- * question has changed, 422 when QuBe Sync couldn't take a field.
- * The question is forgotten once it's answered, or once QuBe Sync says it was answered or asked
- * again since (a 409, or a 400 not_awaiting_input); the run's next webhook says what came of it.
+ * { status, message } (plain text) when it isn't: 403 with no policy to ask (logged), 404 for a
+ * run that isn't there or authorizeQuestion doesn't allow, 409 when the question has changed, 422
+ * when QuBe Sync couldn't take a field. The question is forgotten once it's answered, or once
+ * QuBe Sync says it was answered or asked again since (a 409, or a 400 such as
+ * not_awaiting_input); the run's next webhook says what came of it.
  *
  * form is the posted form: choice, and the choice's fields as data[name] (nested or not).
  */
-async function answerQuestion({ operation, recordId, form, request }) {
-  const { status, found } = await lookup(operation, recordId, request);
+async function answerQuestion({ runId, form, request }) {
+  const { status, found } = await authorizedRun(runId, request, "an answer");
   if (!found) return { status, message: status === 403 ? FORBIDDEN : "Not found" };
-  const { question, links } = found;
+  const question = found.run.openQuestion();
+  const links = found.run.links || {};
   const sent = form || {};
   const choice = ((question && question.choices) || []).find((c) => c.id === sent.choice);
-  if (!question || !choice || !links.decisions) return { status: 409, message: QUESTION_CHANGED };
+  if (!choice || !links.decisions) return { status: 409, message: QUESTION_CHANGED };
 
   try {
-    const data = answerData(choice, sent);
-    await client().answer(links.decisions, { choice: choice.id, data });
+    await client().answer(links.decisions, { choice: choice.id, data: answerData(choice, sent) });
   } catch (err) {
-    const status = err instanceof APIError ? err.status : 0;
-    if (![400, 409, 422].includes(status)) throw err;
+    const refused = err instanceof APIError ? err.status : 0;
+    if (![400, 409, 422].includes(refused)) throw err;
     // A field QuBe Sync couldn't take: its errors.detail says which.
-    if (status === 422) return { status: 422, message: refusalMessage(err) };
+    if (refused === 422) return { status: 422, message: refusalMessage(err) };
+
     await found.operation.answered(question.token);
     return { status: 409, message: QUESTION_CHANGED };
   }
@@ -85,27 +93,57 @@ async function answerQuestion({ operation, recordId, form, request }) {
 /**
  * The matches for a record field, for what your user typed: [{ value, label, detail }], at most
  * 20, from the question's links.search, which a run sets while it asks with one. Resolves to
- * { status, json }: [] for a query under 2 or over 100 characters (nothing is asked), a 403 []
- * while the authorizeQuestion setting isn't set (logged), a 404 [] for a record that isn't found
- * or authorizeQuestion doesn't allow, a 409 [] when the question no longer searches, and QuBe
- * Sync's own 4xx with [].
+ * { status, json }: [] for a query under 2 or over 100 characters or a field name over 100
+ * (nothing is asked), 403 [] with no policy to ask (logged), 404 [] for a run that isn't there or
+ * authorizeQuestion doesn't allow, 409 [] when the question no longer searches, and QuBe Sync's
+ * own 4xx with [].
  */
-async function searchQuestion({ operation, recordId, field, q, request }) {
-  const { status, found } = await lookup(operation, recordId, request);
+async function searchQuestion({ runId, field, q, request }) {
+  const { status, found } = await authorizedRun(runId, request, "a search");
   if (!found) return { status, json: [] };
-  if (!found.links.search) return { status: 409, json: [] };
+  const links = found.run.links || {};
+  if (!links.search) return { status: 409, json: [] };
   const query = typeof q === "string" ? q.trim() : "";
-  if (query.length < SEARCH_LIMITS.minQuery || query.length > SEARCH_LIMITS.maxQuery) return { status: 200, json: [] };
   const name = typeof field === "string" ? field : "";
-  if (name === "" || name.length > SEARCH_LIMITS.maxField) return { status: 200, json: [] };
+  if (!isSearchable(query, name)) return { status: 200, json: [] };
 
   try {
-    return { status: 200, json: await client().search(found.links.search, { field: name, q: query }) };
+    return { status: 200, json: await client().search(links.search, { field: name, q: query }) };
   } catch (err) {
-    const status = err instanceof APIError ? err.status : 0;
-    if (status < 400 || status > 499) throw err;
-    return { status, json: [] }; // the question has changed (409), say
+    const refused = err instanceof APIError ? err.status : 0;
+    if (refused < 400 || refused > 499) throw err;
+    return { status: refused, json: [] }; // the question has changed (409), say
   }
+}
+
+// What a search is asked about: q of 2 to 100 characters, a field name of 1 to 100.
+function isSearchable(query, name) {
+  const { minQuery, maxQuery, maxField } = SEARCH_LIMITS;
+  return query.length >= minQuery && query.length <= maxQuery && name.length >= 1 && name.length <= maxField;
+}
+
+/**
+ * Sends a start QuBe Sync never confirmed (a run still "starting") again, with the same reference
+ * as its Idempotency-Key (Run#retryStart), so a start that did land answers with its run rather
+ * than making another. authorizeQuestion decides who may, as for answering the run's questions.
+ * Resolves to { status: 303 } (send them back to the page, whose status says how it went), or
+ * { status, message }: 403 with no policy to ask, 404 for a run that isn't there or isn't
+ * allowed, 409 for one that isn't starting.
+ */
+async function retryStart({ runId, request }) {
+  const { status, found } = await authorizedRun(runId, request, "a start retry");
+  if (!found) return { status, message: status === 403 ? FORBIDDEN : "Not found" };
+  if (found.run.state !== "starting") return { status: 409, message: NOT_STARTING };
+
+  try {
+    await found.run.retryStart();
+  } catch (err) {
+    if (!(err instanceof APIError) && !isNoAnswer(err)) throw err;
+    // Refused (the run is now failed) or no answer again (still unconfirmed): the status on the
+    // page says which.
+    console.warn(`QuBe Sync: run ${found.run.id}'s start retry didn't go through (${err.name}${err.code ? ` ${err.code}` : ""})`);
+  }
+  return { status: 303 };
 }
 
 /**
@@ -123,11 +161,17 @@ function answerData(choice, form) {
     if (field.type === "boolean") {
       data[field.name] = text === "true";
     } else if (text) {
-      const number = Number(text);
-      data[field.name] = field.type === "number" && Number.isFinite(number) ? number : text;
+      data[field.name] = field.type === "number" ? number(text) : text;
     }
   }
   return data;
+}
+
+// A whole number as an integer, a decimal as a number, and anything else as typed.
+function number(text) {
+  if (/^-?\d+$/.test(text)) return Number.parseInt(text, 10);
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : text;
 }
 
 /** What QuBe Sync said was wrong with an answer, in words (its errors.detail). */
@@ -140,10 +184,12 @@ function refusalMessage(err) {
 
 module.exports = {
   QUESTION_CHANGED,
+  NOT_STARTING,
   SEARCH_LIMITS,
-  findQuestion,
+  authorizedRun,
   answerQuestion,
   searchQuestion,
+  retryStart,
   answerData,
   refusalMessage,
 };

@@ -1,17 +1,23 @@
 "use strict";
 
 // qubesync/kit: QuBe Sync's integration kit without a framework. Everything here is the same for
-// every app: your app's code (its config, its operation classes, its connection class) extends and
-// configures it, and a framework adapter (qubesync/express) mounts its routes. Update it with
-// `npm update qubesync`; don't copy it into your app.
+// every app: your app's code (its config, its store, its operation classes, its connection events
+// class) extends and configures it, and a framework adapter (qubesync/express) mounts its routes.
+// Update it with `npm update qubesync`; don't copy it into your app.
+
+const path = require("path");
 
 const { APIError } = require("../client");
 const settingsModule = require("./settings");
-const { client, connectionWebhookUrl } = require("./client");
+const errors = require("./errors");
+const store = require("./store");
+const { memoryStore } = require("./memory-store");
+const { client } = require("./client");
+const { Connection, Run, recordKey } = require("./records");
 const { Operation } = require("./operation");
 const { ConnectionEvents } = require("./connection-events");
-const { receiveWebhook, run } = require("./job");
-const { startOnboarding } = require("./onboarding");
+const job = require("./job");
+const onboarding = require("./onboarding");
 const questions = require("./questions");
 const render = require("./render");
 const mapping = require("./mapping");
@@ -24,28 +30,50 @@ module.exports = {
   Settings: settingsModule.Settings,
   SETTINGS: settingsModule.SETTINGS,
   CONFIG_FILE: settingsModule.CONFIG_FILE,
-  CONNECTION_SLUG: settingsModule.CONNECTION_SLUG,
+  DEFAULT_JOB_ATTEMPTS: settingsModule.DEFAULT_JOB_ATTEMPTS,
+  // Errors
+  NotConfigured: errors.NotConfigured,
+  UnknownOperation: errors.UnknownOperation,
+  NotReady: errors.NotReady,
+  NotConnected: errors.NotConnected,
+  StoreConflict: errors.StoreConflict,
+  APIError,
+  // The store
+  memoryStore,
+  STORE_METHODS: store.STORE_METHODS,
+  STORE_COLUMNS: store.STORE_COLUMNS,
+  SCHEMA_PATH: path.join(__dirname, "schema.sql"),
+  familyFor: store.familyFor,
   // The API
   client,
-  connectionWebhookUrl,
-  APIError,
+  // Rows
+  Connection,
+  Run,
+  recordKey,
   // Bases
   Operation,
   ConnectionEvents,
   // The webhook endpoint and the job
-  receiveWebhook,
-  run,
+  receiveWebhook: job.receiveWebhook,
+  run: job.run,
+  job: job.job,
+  retryWait: job.retryWait,
+  MAX_BODY_BYTES: job.MAX_BODY_BYTES,
   // Onboarding
-  startOnboarding,
-  // Questions
+  connectQuickbooks: onboarding.connectQuickbooks,
+  resendOnboarding: onboarding.resendOnboarding,
+  // Questions and the start retry
   QUESTION_CHANGED: questions.QUESTION_CHANGED,
+  NOT_STARTING: questions.NOT_STARTING,
   SEARCH_LIMITS: questions.SEARCH_LIMITS,
-  findQuestion: questions.findQuestion,
   answerQuestion: questions.answerQuestion,
   searchQuestion: questions.searchQuestion,
+  retryStart: questions.retryStart,
   answerData: questions.answerData,
   refusalMessage: questions.refusalMessage,
+  // HTML
   renderQuestion: render.renderQuestion,
+  renderRunStatus: render.renderRunStatus,
   escapeHtml: render.escapeHtml,
   SEARCH_SCRIPT: render.SEARCH_SCRIPT,
   // Mapping helpers

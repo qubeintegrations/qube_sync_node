@@ -32,6 +32,12 @@
       "import": "./kit/index.mjs",
       "require": "./kit/index.js"
     },
+    "./kit/store-tests": {
+      "types": "./kit/store-tests.d.ts",
+      "import": "./kit/store-tests.mjs",
+      "require": "./kit/store-tests.js"
+    },
+    "./kit/schema.sql": "./kit/schema.sql",
     "./express": {
       "types": "./express/index.d.ts",
       "import": "./express/index.mjs",
@@ -59,7 +65,7 @@
     "node": ">=16.17"
   },
   "scripts": {
-    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs test/kit.test.js test/express.test.js test/kit-esm.test.mjs",
+    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs test/kit.test.js test/store.test.js test/express.test.js test/kit-esm.test.mjs",
     "test:types": "tsc --noEmit --strict --module node16 --moduleResolution node16 --target es2020 test/types.ts test/kit-types.ts",
     "generate": "node scripts/generate-operations.js",
     "generate:check": "node scripts/generate-operations.js --check"

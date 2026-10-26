@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert";
 import { createRequire } from "node:module";
 
-import kit, { configure, Operation, ConnectionEvents, renderQuestion, run } from "qubesync/kit";
+import kit, { configure, Operation, ConnectionEvents, Connection, Run, memoryStore, renderQuestion, renderRunStatus, run } from "qubesync/kit";
+import storeTests, { storeTests as namedStoreTests } from "qubesync/kit/store-tests";
 import adapter, { webhooks, connect, questions } from "qubesync/express";
 import * as localKit from "../kit/index.mjs";
 import * as localExpress from "../express/index.mjs";
@@ -20,6 +21,12 @@ describe("ESM wrappers: qubesync/kit and qubesync/express", () => {
     assert.strictEqual(ConnectionEvents, cjsKit.ConnectionEvents);
     assert.strictEqual(renderQuestion, cjsKit.renderQuestion);
     assert.strictEqual(run, cjsKit.run);
+    assert.strictEqual(Connection, cjsKit.Connection);
+    assert.strictEqual(Run, cjsKit.Run);
+    assert.strictEqual(memoryStore, cjsKit.memoryStore);
+    assert.strictEqual(renderRunStatus, cjsKit.renderRunStatus);
+    assert.strictEqual(storeTests, require("qubesync/kit/store-tests"));
+    assert.strictEqual(namedStoreTests, storeTests);
     assert.strictEqual(webhooks, cjsExpress.webhooks);
     assert.strictEqual(connect, cjsExpress.connect);
     assert.strictEqual(questions, cjsExpress.questions);

@@ -1,29 +1,35 @@
 "use strict";
 
-// renderQuestion(question, { action, csrfToken, nonce }): the question a QuBe Sync run is asking
-// about one of your records, as HTML for the record's page, with a form per choice, or "" when it
-// isn't asking. question is the one Operation's question saved (savedQuestion: the record's
-// qube_question, as written), and action the record's answer route,
-// <mount>/qube/questions/<operation slug>/<record id> (the questions router):
+// renderQuestion(run, options) and renderRunStatus(run, options): a record's latest run of an
+// operation, as HTML for the record's page. Find the run with Run.latestFor:
 //
-//   const html = renderQuestion(invoice.qube_question, {
-//     action: `/qube/questions/create_invoice/${encodeURIComponent(invoice.id)}`,
-//     csrfToken: req.csrfToken && req.csrfToken(),
+//   const run = await Run.latestFor(invoice, "create_invoice");
+//   const html = renderRunStatus(run, { csrfToken }) + renderQuestion(run, {
+//     csrfToken: req.csrfToken && req.csrfToken(), // your CSRF protection's
+//     nonce: res.locals.cspNonce, // your Content-Security-Policy's, on the search box's script
 //   });
 //
-// Each form posts your user's choice there, and a record field's box searches through it, so the
-// API key never reaches the browser. Every value is escaped. csrfToken, your CSRF protection's,
-// goes in each form as _csrf (or csrfField), and nonce, your Content-Security-Policy's, on the
-// search box's script. The markup is plain, with qube- classes for your CSS. For other markup,
-// write your own with escapeHtml and SEARCH_SCRIPT: the routes only need the form's fields
-// (choice, data[name]) and the search box's data-qube-search and data-qube-field.
+// renderQuestion shows the question the run is asking (Operation's question kept it), with a form
+// per choice, or "" when it isn't asking. Each form posts your user's choice to the run's answer
+// route, <mount>/qube/questions/runs/<run id> (the questions router), and a record field's box
+// searches through it too, so the API key never reaches the browser.
+//
+// renderRunStatus says where the run stands, in a sentence (Run#summaryText), and what went wrong
+// when it failed (Run#errorDetail), or "" for no run. A start QuBe Sync hasn't confirmed for a
+// minute gets a "Try the start again" button, posting to <mount>/qube/runs/<run id>/retry_start,
+// which resends it with the same reference.
+//
+// mount is where the questions router is mounted ("" for the app's root). Every value is escaped.
+// csrfToken goes in each form as _csrf (or csrfField). The markup is plain, with qube- classes for
+// your CSS. For other markup, write your own with escapeHtml and SEARCH_SCRIPT: the routes only
+// need the form's fields (choice, data[name]) and the search box's data-qube-search and
+// data-qube-field.
 
-function renderQuestion(question, options) {
-  const { action, csrfToken, nonce, csrfField = "_csrf" } = options || {};
+function renderQuestion(run, options) {
+  const { csrfToken, nonce, csrfField = "_csrf", mount = "" } = options || {};
+  const question = run && typeof run.openQuestion === "function" ? run.openQuestion() : null;
   if (!question) return "";
-  if (typeof action !== "string" || action === "") {
-    throw new TypeError("renderQuestion needs { action }: the record's answer route, /qube/questions/<operation>/<record id>");
-  }
+  const action = `${trimMount(mount)}/qube/questions/runs/${encodeURIComponent(String(run.id))}`;
   const html = [`<section class="qube-question">`];
   html.push(`  <p class="qube-question-message">${escapeHtml(question.message)}</p>`);
   const details = question.details || [];
@@ -37,9 +43,7 @@ function renderQuestion(question, options) {
   }
   (question.choices || []).forEach((choice, n) => {
     html.push(`  <form class="qube-choice" method="post" action="${escapeHtml(action)}">`);
-    if (csrfToken) {
-      html.push(`    <input type="hidden" name="${escapeHtml(csrfField)}" value="${escapeHtml(csrfToken)}">`);
-    }
+    html.push(...csrfInput(csrfToken, csrfField));
     html.push(`    <input type="hidden" name="choice" value="${escapeHtml(choice.id)}">`);
     for (const field of choice.fields || []) {
       const id = `qube-${question.token}-${n}-${field.name}`;
@@ -56,6 +60,34 @@ function renderQuestion(question, options) {
   });
   html.push(`</section>`);
   return html.join("\n");
+}
+
+function renderRunStatus(run, options) {
+  const { csrfToken, csrfField = "_csrf", mount = "", now = new Date() } = options || {};
+  if (!run || typeof run.summaryText !== "function") return "";
+  const state = run.cancelled() ? "cancelled" : run.state;
+  const html = [`<div class="qube-run-status qube-run-${escapeHtml(state)}">`];
+  html.push(`  <p class="qube-run-summary">${escapeHtml(run.summaryText(now))}</p>`);
+  const detail = run.failed() ? run.errorDetail() : null;
+  if (detail) html.push(`  <p class="qube-run-error-detail">${escapeHtml(detail)}</p>`);
+  if (run.unconfirmed(now)) {
+    const action = `${trimMount(mount)}/qube/runs/${encodeURIComponent(String(run.id))}/retry_start`;
+    html.push(`  <form class="qube-retry-start-form" method="post" action="${escapeHtml(action)}">`);
+    html.push(...csrfInput(csrfToken, csrfField));
+    html.push(`    <button type="submit" class="qube-retry-start">Try the start again</button>`);
+    html.push(`  </form>`);
+  }
+  html.push(`</div>`);
+  return html.join("\n");
+}
+
+function trimMount(mount) {
+  return String(mount || "").replace(/\/+$/, "");
+}
+
+function csrfInput(csrfToken, csrfField) {
+  if (!csrfToken) return [];
+  return [`    <input type="hidden" name="${escapeHtml(csrfField)}" value="${escapeHtml(csrfToken)}">`];
 }
 
 // One field of a choice, with its label: a record field is a search box.
@@ -162,4 +194,4 @@ const SEARCH_SCRIPT = `
 })();
 `;
 
-module.exports = { renderQuestion, escapeHtml, SEARCH_SCRIPT };
+module.exports = { renderQuestion, renderRunStatus, escapeHtml, SEARCH_SCRIPT };

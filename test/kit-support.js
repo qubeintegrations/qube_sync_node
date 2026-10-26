@@ -1,7 +1,8 @@
 "use strict";
 
-// What the kit's tests share: a local fake of QuBe Sync's API, records kept in memory, signed
-// bodies from the vectors, and a capture of what the kit logs.
+// What the kit's tests share: a local fake of QuBe Sync's API, an app's records kept in memory,
+// the kit's own rows in memoryStore(), signed bodies from the vectors, and a capture of what the
+// kit logs.
 
 const assert = require("node:assert");
 const crypto = require("node:crypto");
@@ -14,8 +15,10 @@ const kit = require("../kit");
 const vectors = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "test_vectors.json"), "utf8"));
 const SECRET = vectors.secrets[0];
 const API_KEY = "sk_test_kit_never_show_me";
+// The vectors' connection id: a connection made with it receives the vectors' events.
 const CONN = "0196a1c0-0000-7000-8000-00000000c001";
 const RUN = "0196a1c0-0000-7000-8000-00000000f001";
+const WEBHOOK_URL = "https://app.example.com/webhooks/qube";
 
 // ---------------------------------------------------------------------------
 // The fake QuBe Sync: records every request, answers from a queue.
@@ -36,9 +39,14 @@ const server = http.createServer((req, res) => {
       body: text === "" ? undefined : JSON.parse(text),
     });
     const answer = fake.responses.length > 1 ? fake.responses.shift() : fake.responses[0] || {};
-    const body = answer.json !== undefined ? JSON.stringify(answer.json) : answer.raw || "";
-    res.writeHead(answer.status || 200, { "content-type": "application/json" });
-    res.end(body);
+    if (answer.destroy) return req.socket.destroy();
+    // before: something that happens while QuBe Sync has the request (a webhook that beats the
+    // answer back).
+    Promise.resolve(answer.before && answer.before()).then(() => {
+      const body = answer.json !== undefined ? JSON.stringify(answer.json) : answer.raw || "";
+      res.writeHead(answer.status || 200, { "content-type": "application/json" });
+      res.end(body);
+    });
   });
 });
 
@@ -56,6 +64,15 @@ const ready = new Promise((resolve, reject) => {
 
 function answer(...list) {
   fake.responses = list;
+}
+
+// What QuBe Sync answers with: { data }.
+function data(value, status = 200) {
+  return { status, json: { data: value } };
+}
+
+function apiError(status, errors) {
+  return { status, json: { errors } };
 }
 
 // ---------------------------------------------------------------------------
@@ -79,23 +96,22 @@ function logged() {
   return lines;
 }
 
-// ---------------------------------------------------------------------------
-// Records kept in memory, saved with save() as an ORM's would be.
+function loggedText() {
+  return lines.map((line) => `${line.level} ${line.text}`).join("\n");
+}
 
-class Store {
-  constructor() {
+// ---------------------------------------------------------------------------
+// The app's records, kept in memory. Their tables have no QuBe columns.
+
+class Table {
+  constructor(Model) {
+    this.Model = Model;
     this.rows = new Map();
+    this.next = 0;
   }
-  add(fields) {
-    const store = this;
-    const row = {
-      ...fields,
-      saves: 0,
-      save() {
-        row.saves += 1;
-        store.rows.set(String(row.id), row);
-      },
-    };
+  add(fields = {}) {
+    this.next += 1;
+    const row = Object.assign(new this.Model(), { id: this.next, ...fields });
     this.rows.set(String(row.id), row);
     return row;
   }
@@ -104,8 +120,11 @@ class Store {
   }
 }
 
-const invoices = new Store();
-const accounts = new Store();
+class Account {}
+class Invoice {}
+class Customer {}
+
+const tables = { Account: new Table(Account), Invoice: new Table(Invoice), Customer: new Table(Customer) };
 
 // What each handler was called with, in order.
 const calls = [];
@@ -115,60 +134,116 @@ class CreateInvoice extends kit.Operation {
   static slug = "create_invoice";
 
   static async findRecord(id) {
-    return invoices.find(id);
+    return tables.Invoice.find(id);
   }
 
   input() {
-    return kit.withoutNils({ operation: "invoice.create", params: { ref_number: kit.asString(this.record.id), memo: null } });
+    return this.withoutNils({ operation: "invoice.create", params: { ref_number: this.record.number, memo: null } });
   }
 
   async notification(event) {
-    calls.push(["notification", this.record.id, event.deliveryId]);
+    calls.push(["notification", event.deliveryId]);
   }
+
   async ended(event) {
-    calls.push(["ended", this.record.id, event.outcome]);
+    calls.push(["ended", event.outcome, this.run.id, this.connection.id]);
+    this.record.status = "sent";
+    const txn = (event.output && event.output.record) || {};
+    if (txn.txn_id) await this.connection.link(this.record, { kind: "invoice", qbId: txn.txn_id, name: txn.ref_number });
   }
+
   async failed(event) {
-    calls.push(["failed", this.record.id, event.event]);
+    calls.push(["failed", event.event]);
+    this.record.status = "failed";
   }
 }
 
-class Account extends kit.ConnectionEvents {
-  static async findRecord(id) {
-    return accounts.find(id);
+// An operation with no findRecord: its record comes from the findRecord setting, by its type.
+class SyncCustomer extends kit.Operation {
+  static workflow = "ensure_customer";
+  static slug = "sync_customer";
+
+  input() {
+    return { name: this.record.name };
   }
-  async connected(event) {
-    calls.push(["connected", this.account.id, event.connectionId]);
-  }
-  async setupCancelled(event) {
-    calls.push(["setupCancelled", this.account.id, event.revision]);
-  }
-  async stalled(event) {
-    calls.push(["stalled", this.account.id, event.stallReason]);
-  }
-  async resumed(event) {
-    calls.push(["resumed", this.account.id, event.revision]);
+
+  async ended() {
+    calls.push(["ended", this.record]);
   }
 }
 
-// A fresh slate: settings, records, calls, the fake's queue and logs.
+class Events extends kit.ConnectionEvents {
+  async connected() {
+    const owner = await this.owner();
+    calls.push(["connected", this.connection.id, owner.id, this.connection.status]);
+  }
+  async setupCancelled() {
+    const owner = await this.owner();
+    calls.push(["setupCancelled", this.connection.id, owner.id, this.connection.status]);
+  }
+  async stalled() {
+    const owner = await this.owner();
+    calls.push(["stalled", this.connection.id, owner.id, this.connection.stallReason]);
+  }
+  async resumed() {
+    const owner = await this.owner();
+    calls.push(["resumed", this.connection.id, owner.id, this.connection.stallReason]);
+  }
+}
+
+// A fresh slate: settings, a new memory store, the app's tables, calls, the fake's queue and logs.
+// currentAccount reads the signed-in account from request.account (the Express tests' sign-in
+// sets it); authorizeQuestion is left to its default.
 function reset(extra = {}) {
   kit.resetSettings();
-  invoices.rows.clear();
-  accounts.rows.clear();
+  for (const table of Object.values(tables)) {
+    table.rows.clear();
+    table.next = 0;
+  }
   calls.length = 0;
   fake.received = [];
   fake.responses = [];
   capture();
-  return kit.configure({
-    operations: { create_invoice: CreateInvoice },
-    connection: Account,
+  const store = kit.memoryStore();
+  kit.configure({
+    store,
+    operations: { create_invoice: CreateInvoice, sync_customer: SyncCustomer },
+    connectionEvents: Events,
+    currentAccount: (request) => (request && request.account) || null,
+    findRecord: (type, id) => (tables[type] ? tables[type].find(id) : null),
     apiKey: API_KEY,
     baseUrl: fake.base,
     webhookSecret: SECRET,
-    webhookUrl: "https://app.example.com/webhooks/qube/",
+    webhookUrl: `${WEBHOOK_URL}/`,
     ...extra,
   });
+  return store;
+}
+
+// ---------------------------------------------------------------------------
+// Rows
+
+async function makeConnection(owner, { qubeId = CONN, status = "connected", name = null } = {}) {
+  const made = await kit.Connection.create(owner, { name });
+  return made.update({ qubeId, status });
+}
+
+async function makeRun(record, connection, { operation = "create_invoice", reference, revision = 0, state = "running", ...rest } = {}) {
+  const row = await kit.settings().store.createRun({
+    connectionId: connection.id,
+    operation,
+    recordType: record.constructor.name,
+    recordId: String(record.id),
+    reference: reference || `${operation}-${record.id}-${crypto.randomUUID()}`,
+    state,
+    revision,
+    ...rest,
+  });
+  return kit.Run.load(row);
+}
+
+async function reload(run) {
+  return kit.Run.get(run.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,12 +256,22 @@ function vectorBody(name, changes = {}) {
   return JSON.stringify(body);
 }
 
+// A vector's run event, made this run's (its reference and its connection's qubeId).
+function runBody(name, run, changes = {}) {
+  return vectorBody(name, { reference: run.reference, connection_id: run.connection.qubeId, ...changes });
+}
+
 function sign(body, secret = SECRET, t = Math.floor(Date.now() / 1000)) {
   const hex = crypto.createHmac("sha256", secret).update(`${t}.`).update(Buffer.from(body, "utf8")).digest("hex");
   return `t=${t},v1=${hex}`;
 }
 
-// A test that waits for the fake, starts from a clean slate, and puts console back.
+// One of QuBe Sync's connections, as GET /api/v2/connections lists it, made for row just now.
+function qubeConnectionFor(row, changes = {}) {
+  return { id: "conn-q-lost", webhook_url: row.webhookUrl(), last_connected_at: null, name: row.name, created_at: new Date().toISOString(), ...changes };
+}
+
+// A test that waits for the fake, and puts console back.
 function it(nodeIt, name, fn) {
   nodeIt(name, async () => {
     await ready;
@@ -205,19 +290,31 @@ module.exports = {
   API_KEY,
   CONN,
   RUN,
+  WEBHOOK_URL,
   fake,
   ready,
   answer,
+  data,
+  apiError,
   capture,
   release,
   logged,
-  invoices,
-  accounts,
+  loggedText,
+  tables,
+  Account,
+  Invoice,
+  Customer,
   calls,
   CreateInvoice,
-  Account,
+  SyncCustomer,
+  Events,
   reset,
+  makeConnection,
+  makeRun,
+  reload,
   vectorBody,
+  runBody,
   sign,
+  qubeConnectionFor,
   it,
 };

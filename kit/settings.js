@@ -2,20 +2,27 @@
 
 // The kit's settings: the only place qubesync/kit reads your app from. Your app sets them once,
 // with configure(...) in its quickbooks-desktop/config file, and the kit reads them in memory
-// when it needs one. A setting your app hasn't written throws the first time it's needed, naming
-// that file, so nothing silently passes; the secrets and URLs fall back to the environment.
+// when it needs one. A setting your app hasn't written throws NotConfigured the first time it's
+// needed, naming that file, so nothing silently passes; the secrets and URLs fall back to the
+// environment.
 
 const util = require("util");
+
+const { NotConfigured } = require("./errors");
+const { missingStoreMethods } = require("./store");
 
 const CONFIG_FILE = "your app's quickbooks-desktop/config";
 
 const KEYS = Object.freeze([
+  "store",
   "operations",
-  "connection",
+  "connectionEvents",
   "currentAccount",
   "authorizeQuestion",
+  "recordType",
+  "findRecord",
   "enqueue",
-  "dedupe",
+  "jobAttempts",
   "apiKey",
   "baseUrl",
   "webhookSecret",
@@ -34,27 +41,20 @@ const ENV = Object.freeze({
 });
 
 const DEFAULT_BASE_URL = "https://qubesync.com";
-
-// "connection" is the connection's own slug in webhook URLs (ConnectionEvents), never an
-// operation's.
-const CONNECTION_SLUG = "connection";
+const DEFAULT_JOB_ATTEMPTS = 10;
 
 let values = {};
 let changes = 0; // bumped by configure, so client() knows to make a new Client
 
-function unset(key, how) {
-  return new Error(
-    `QuBe Sync: the ${key} setting isn't set. Set it with configure({ ${key} }) in ${CONFIG_FILE}${how ? `: ${how}` : ""}.`
-  );
+function notConfigured(key, what) {
+  return new NotConfigured(`QuBe Sync: ${key} isn't set yet. Set it (${what}) with configure({ ${key} }) in ${CONFIG_FILE}.`);
 }
 
 function fromEnv(key) {
   const name = ENV[key];
   const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `QuBe Sync: ${name} is not set. Set it in the environment, or ${key} with configure(...) in ${CONFIG_FILE}.`
-    );
+  if (!value || value.trim() === "") {
+    throw new NotConfigured(`QuBe Sync: ${key} isn't set yet. Set ${name} in the environment, or ${key} with configure(...) in ${CONFIG_FILE}.`);
   }
   return value;
 }
@@ -64,7 +64,8 @@ function isSubclass(value, Base) {
 }
 
 // The operations as a Map, slug to class, checked: each is an Operation whose static slug is its
-// key, so the webhook URL it writes is the one the endpoint finds it by.
+// key, since a run row keeps the slug and the job finds the class by it. A fixed list, so a class
+// is never looked up from anything a request says.
 function operationMap(operations) {
   const { Operation } = require("./operation");
   let entries;
@@ -74,17 +75,12 @@ function operationMap(operations) {
 
   const map = new Map();
   for (const [slug, OperationClass] of entries) {
-    if (slug === CONNECTION_SLUG) {
-      throw new TypeError(
-        `QuBe Sync: "${CONNECTION_SLUG}" is the connection's own slug in webhook URLs: set the connection class with the connection setting, and give the operation another slug`
-      );
-    }
     if (!isSubclass(OperationClass, Operation) || OperationClass === Operation) {
       throw new TypeError(`QuBe Sync: operations.${slug} must be a class that extends Operation (from qubesync/kit)`);
     }
     if (OperationClass.slug !== slug) {
       throw new TypeError(
-        `QuBe Sync: operations.${slug} is ${OperationClass.name}, whose static slug is ${JSON.stringify(OperationClass.slug)}: they must match, since its webhook URL names its slug`
+        `QuBe Sync: operations.${slug} is ${OperationClass.name}, whose static slug is ${JSON.stringify(OperationClass.slug)}: they must match, since each run keeps its slug`
       );
     }
     if (typeof OperationClass.workflow !== "string" || OperationClass.workflow === "") {
@@ -96,31 +92,38 @@ function operationMap(operations) {
 }
 
 function checkFunction(key, value) {
-  if (typeof value !== "function") throw new TypeError(`QuBe Sync: ${key} must be a function`);
+  if (typeof value !== "function") throw new TypeError(`QuBe Sync: ${key} must be a function, in ${CONFIG_FILE}`);
   return value;
 }
 
 function checkString(key, value) {
-  if (typeof value !== "string" || value === "") throw new TypeError(`QuBe Sync: ${key} must be a non-empty string`);
+  if (typeof value !== "string" || value === "") throw new TypeError(`QuBe Sync: ${key} must be a non-empty string, in ${CONFIG_FILE}`);
   return value;
 }
 
 const CHECKS = {
+  store(value) {
+    const missing = missingStoreMethods(value);
+    if (missing.length > 0) {
+      throw new TypeError(`QuBe Sync: store is missing ${missing.join(", ")} (see qubesync/kit's Store, and memoryStore() for one)`);
+    }
+    return value;
+  },
   operations: operationMap,
-  connection(value) {
+  connectionEvents(value) {
     const { ConnectionEvents } = require("./connection-events");
     if (!isSubclass(value, ConnectionEvents)) {
-      throw new TypeError("QuBe Sync: connection must be a class that extends ConnectionEvents (from qubesync/kit)");
+      throw new TypeError("QuBe Sync: connectionEvents must be a class that extends ConnectionEvents (from qubesync/kit)");
     }
     return value;
   },
   currentAccount: (value) => checkFunction("currentAccount", value),
   authorizeQuestion: (value) => checkFunction("authorizeQuestion", value),
+  recordType: (value) => checkFunction("recordType", value),
+  findRecord: (value) => checkFunction("findRecord", value),
   enqueue: (value) => checkFunction("enqueue", value),
-  dedupe(value) {
-    if (!value || typeof value.seen !== "function" || typeof value.remember !== "function") {
-      throw new TypeError("QuBe Sync: dedupe must be an object with seen(key) and remember(key)");
-    }
+  jobAttempts(value) {
+    if (!Number.isInteger(value) || value < 1) throw new TypeError(`QuBe Sync: jobAttempts is a whole number of 1 or more, in ${CONFIG_FILE}`);
     return value;
   },
   apiKey: (value) => checkString("apiKey", value),
@@ -136,96 +139,117 @@ const CHECKS = {
 };
 
 // ---------------------------------------------------------------------------
-// The defaults for enqueue and dedupe: in this process, each with the warning it needs.
+// The defaults
+
+// The type a record's rows keep (a run's recordType, a connection's ownerType, a QuickBooks id's
+// recordType): its class's name, as an ORM's model instance has it. A plain object (Prisma's, or
+// a query builder's) has none to give, so the app sets recordType for those.
+function classNameOf(record) {
+  const made = record !== null && typeof record === "object" ? record.constructor : null;
+  if (typeof made !== "function" || made === Object || !made.name) {
+    throw new NotConfigured(
+      `QuBe Sync: a record with no class of its own can't name its type. Set recordType with configure({ recordType: (record) => "Invoice" }) in ${CONFIG_FILE}.`
+    );
+  }
+  return made.name;
+}
+
+// Until your app sets findRecord, nothing can be found by type and id: an operation needs its own
+// static findRecord, and findLinked and a connection's owner() throw.
+function findRecordUnset(type, id) {
+  throw notConfigured("findRecord", `(type, id) => your record of that type, here a ${type} ${id}`);
+}
+
+// Whether the signed-in user may answer or search a run's question, when your app hasn't said:
+// the signed-in account (currentAccount) owns the run's connection. Compared by type and id, as
+// the connection keeps them, so a null account, or one with no id yet, never matches.
+async function ownerAnswers(request, record, run) {
+  const account = await instance.currentAccount(request);
+  if (!hasId(account)) return false;
+  const { recordKey } = require("./records");
+  const [type, id] = recordKey(account);
+  return ownsConnection(type, id, run.connection);
+}
+
+function hasId(account) {
+  return account !== null && account !== undefined && account.id !== null && account.id !== undefined && account.id !== "";
+}
+
+function ownsConnection(type, id, connection) {
+  return Boolean(connection) && type === connection.ownerType && id === String(connection.ownerId);
+}
 
 let warnedEnqueue = false;
-let warnedDedupe = false;
-let lastJob = Promise.resolve();
 
-// Runs the jobs in this process, after the response, one at a time in the order they came, until
-// your app sets enqueue to a durable queue: a restart loses the jobs it hasn't run, so do that
-// before production. QuBe Sync had its 2xx when a job was enqueued, so it won't send it again.
-function inProcessEnqueue(job) {
+// Runs each delivery in this process, after the response (job(), with its retries), until your
+// app sets enqueue to a durable queue: a restart loses the ones not yet run, so do that before
+// production. QuBe Sync had its 2xx when a delivery was enqueued, so it won't send it again.
+function inProcessEnqueue(delivery) {
   if (!warnedEnqueue) {
     warnedEnqueue = true;
     console.warn(
-      "QuBe Sync: running webhook jobs in this process, after the response (the enqueue setting isn't set). " +
-        `A restart loses the ones not yet run: before production, set enqueue in ${CONFIG_FILE} to a durable queue whose worker calls run(job).`
+      "QuBe Sync: running webhook deliveries in this process, after the response (the enqueue setting isn't set). " +
+        `A restart loses the ones not yet run: before production, set enqueue in ${CONFIG_FILE} to a durable queue whose worker calls run(delivery).`
     );
   }
-  const { run } = require("./job");
-  lastJob = lastJob
-    .then(() => new Promise((resolve) => setImmediate(resolve)))
-    .then(() => run(job))
-    .catch((err) => {
-      console.error(`QuBe Sync: the ${job.operation} job for ${job.recordId} failed:`, err);
+  const { job } = require("./job");
+  setImmediate(() => {
+    job(delivery).catch(() => {
+      // job logged it when it gave up
     });
-}
-
-// The notification delivery ids already taken, in this process's memory, until your app sets
-// dedupe to its database or Redis: a retry that reaches another process, or comes after a
-// restart, is taken again.
-const delivered = new Set();
-const inMemoryDedupe = Object.freeze({
-  seen(key) {
-    if (!warnedDedupe) {
-      warnedDedupe = true;
-      console.warn(
-        "QuBe Sync: notification delivery ids are kept in this process's memory (the dedupe setting isn't set). " +
-          `A retry after a restart, or one another process takes, is handled again: set dedupe in ${CONFIG_FILE} to your database or Redis.`
-      );
-    }
-    return delivered.has(key);
-  },
-  remember(key) {
-    delivered.add(key);
-  },
-});
-
-// Until your app writes authorizeQuestion, every answer and search is refused, with a 403 and
-// this warning, since it's a setup mistake to see: the record's id comes from the URL, so it's all
-// that keeps one customer's users off another's records.
-function refuseUnauthorized(request, record, operation) {
-  const id = record && record.id;
-  console.warn(
-    `QuBe Sync: refused an answer or search for ${operation} ${id}: the authorizeQuestion setting isn't set. ` +
-      `Set it with configure({ authorizeQuestion }) in ${CONFIG_FILE}: (req, record) => true when the signed-in user may act on record.`
-  );
-  return false;
+  });
 }
 
 // ---------------------------------------------------------------------------
 
 class Settings {
+  /** Where the kit keeps connections, runs, notifications and QuickBooks ids (a Store). */
+  get store() {
+    if (!values.store) throw notConfigured("store", "your app's store; memoryStore() for tests");
+    return values.store;
+  }
+
   /** slug → operation class, as a Map. */
   get operations() {
-    if (!values.operations) throw unset("operations", "each operation class by its slug, { create_invoice: CreateInvoice }");
+    if (!values.operations) throw notConfigured("operations", "each operation class by its slug, { create_invoice: CreateInvoice }");
     return values.operations;
   }
 
-  /** The connection class (extends ConnectionEvents). */
-  get connection() {
-    if (!values.connection) throw unset("connection", "the class that extends ConnectionEvents");
-    return values.connection;
+  /** Your class for a connection's events (extends ConnectionEvents). */
+  get connectionEvents() {
+    if (!values.connectionEvents) throw notConfigured("connectionEvents", "your class that extends ConnectionEvents");
+    return values.connectionEvents;
   }
 
-  /** (req) → the signed-in customer's account. */
+  /** (req) → the signed-in customer's account, which owns its connections. */
   get currentAccount() {
-    if (!values.currentAccount) throw unset("currentAccount", "(req) => the signed-in customer's account");
+    if (!values.currentAccount) throw notConfigured("currentAccount", "(req) => the signed-in customer's account");
     return values.currentAccount;
   }
 
-  /** (req, record, operation) → true when the signed-in user may answer or search record's question. */
+  /** (req, record, run) → true when the signed-in user may answer or search the run's question. */
   get authorizeQuestion() {
-    return values.authorizeQuestion || refuseUnauthorized;
+    return values.authorizeQuestion || ownerAnswers;
   }
 
+  /** (record) → the type its rows keep. */
+  get recordType() {
+    return values.recordType || classNameOf;
+  }
+
+  /** (type, id) → your record of that type, or null. */
+  get findRecord() {
+    return values.findRecord || findRecordUnset;
+  }
+
+  /** (delivery) → hands { kind, id, body } to a queue. */
   get enqueue() {
     return values.enqueue || inProcessEnqueue;
   }
 
-  get dedupe() {
-    return values.dedupe || inMemoryDedupe;
+  /** How many times job() runs a delivery before it gives up. */
+  get jobAttempts() {
+    return values.jobAttempts || DEFAULT_JOB_ATTEMPTS;
   }
 
   get apiKey() {
@@ -240,24 +264,30 @@ class Settings {
     return values.webhookSecret || fromEnv("webhookSecret");
   }
 
+  /** The base of every webhook URL, without a trailing slash. */
   get webhookUrl() {
-    return values.webhookUrl || fromEnv("webhookUrl");
+    return (values.webhookUrl || fromEnv("webhookUrl")).replace(/\/+$/, "");
   }
 
-  /** The class the slug in a webhook URL names: "connection" or an operation's; null for any other. */
-  classFor(slug) {
-    if (slug === CONNECTION_SLUG) return this.connection;
+  /** Whether your app set key, rather than leaving it to a default or the environment. */
+  isSet(key) {
+    return values[key] !== undefined;
+  }
+
+  /** The operation class for a slug, or null when none of your operations has it. */
+  operationClass(slug) {
     const operations = this.operations;
-    return operations.has(slug) ? operations.get(slug) : null;
+    return typeof slug === "string" && operations.has(slug) ? operations.get(slug) : null;
   }
 
-  /** Which settings your app has set (true) and which fall back to a default or the environment. */
+  /** Which settings your app has set and which fall back to a default or the environment. */
   describe() {
     const described = {};
     for (const key of KEYS) {
       if (SECRET_KEYS.includes(key)) described[key] = values[key] ? "[set]" : process.env[ENV[key]] ? "[from env]" : "[unset]";
       else if (key === "operations") described[key] = values.operations ? [...values.operations.keys()] : "[unset]";
-      else if (key === "connection") described[key] = values.connection ? values.connection.name : "[unset]";
+      else if (key === "connectionEvents") described[key] = values.connectionEvents ? values.connectionEvents.name : "[unset]";
+      else if (key === "jobAttempts") described[key] = this.jobAttempts;
       else if (key === "baseUrl" || key === "webhookUrl") {
         described[key] = values[key] || process.env[ENV[key]] || (key === "baseUrl" ? DEFAULT_BASE_URL : "[unset]");
       } else described[key] = values[key] ? "[set]" : "[default]";
@@ -314,12 +344,11 @@ function settingsVersion() {
 
 module.exports = {
   CONFIG_FILE,
-  CONNECTION_SLUG,
   SETTINGS: KEYS,
+  DEFAULT_JOB_ATTEMPTS,
   Settings,
   configure,
   settings,
   resetSettings,
   settingsVersion,
-  refuseUnauthorized,
 };

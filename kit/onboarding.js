@@ -1,45 +1,99 @@
 "use strict";
 
 // Connects a customer's QuickBooks Desktop. QuBe Sync hosts the setup and walks them through the
-// Web Connector, on the computer where QuickBooks is installed, and tells your app how it went by
-// webhook (your connection class, a ConnectionEvents): connection.connected, or
+// Web Connector, on the computer where QuickBooks is installed, and tells the connection how it
+// went by webhook (ConnectionEvents, then your connectionEvents class): connection.connected, or
 // connection.setup_cancelled.
+//
+// An account can have any number of connections (a company file each), so each is its own row
+// (Connection), owned by the signed-in account (the currentAccount setting). Both routes go
+// behind your sign-in.
 
 const { client } = require("./client");
+const { Connection, blank, recordKey } = require("./records");
 const { settings } = require("./settings");
 
+// The statuses of a connection that has never connected.
+const NEVER_CONNECTED = Object.freeze(["pending", "setup_cancelled"]);
+
 /**
- * Onboarding for the signed-in customer (from a "Connect QuickBooks Desktop" button, best clicked
- * on the computer where QuickBooks is installed): their connection, made the first time and the
- * same one after that, with its webhook URL brought up to date and a fresh link. Resolves to
- * { status: 303, location } (the setup page), or { status: 401 } when currentAccount finds no
- * account. Until connection.connected comes, show the account as waiting for QuickBooks: the
- * setup doesn't come back here.
+ * POST quickbooks/connections, from a "Connect QuickBooks Desktop" button, with an optional name.
+ * Best clicked on the computer where QuickBooks is installed. It sends the account's newest
+ * connection that has never connected (pending, or its setup cancelled) back through setup, so
+ * clicking Connect again doesn't pile up connections; it makes a new one when the account has
+ * none, or with another: true (new=1, from a "Connect another company file" button). A new row is
+ * written first, so the connection's webhook URL names it; if QuBe Sync doesn't answer, the row is
+ * left without a qubeId and the next click picks it up. Until connection.connected comes, show it
+ * as waiting for QuickBooks: the setup doesn't come back here.
+ *
+ * Resolves to { status: 303, location } (the setup page), or { status: 401 } when currentAccount
+ * finds no signed-in account.
  */
-async function startOnboarding(request) {
-  const current = settings();
-  const account = await current.currentAccount(request);
-  if (account === null || account === undefined) {
-    console.warn("QuBe Sync: onboarding refused: currentAccount found no signed-in account (is the route behind your sign-in?)");
-    return { status: 401 };
+async function connectQuickbooks({ request, name, another = false } = {}) {
+  const account = await signedInAccount(request, "a connect");
+  if (!account) return { status: 401 };
+
+  if (!another) {
+    // Newest first, as the store lists them.
+    const waiting = (await Connection.ownedBy(account)).find((connection) => NEVER_CONNECTED.includes(connection.status));
+    if (waiting) return sendToSetup(waiting);
   }
 
-  // Where QuBe Sync says the connection is set up (connection.connected): your connection
-  // class, by this account's id.
-  const events = new current.connection(account);
-  const webhookUrl = events.webhookUrl();
-  const connectionId = await events.savedConnectionId();
-  let connection;
-  if (connectionId) {
-    // Connected before: the same connection, its webhook URL brought up to date, with a fresh
-    // link.
-    await client().updateConnection(connectionId, { webhookUrl });
-    connection = await client().regenerateOnboarding(connectionId);
-  } else {
-    connection = await client().createConnection({ webhookUrl });
-    await events.saveConnectionId(connection.id);
-  }
-  return { status: 303, location: connection.links.onboarding };
+  const made = await Connection.create(account, { name: connectionName(name) });
+  return sendToSetup(made, { fresh: true });
 }
 
-module.exports = { startOnboarding };
+/**
+ * POST quickbooks/connections/:id/onboarding: sends one of the signed-in account's connections
+ * back through setup (a new company file, a Web Connector set up again), with its webhook URL
+ * brought up to date. Resolves to { status: 303, location }, { status: 401 } with no signed-in
+ * account, or { status: 404 } for a connection that isn't there or is another account's.
+ */
+async function resendOnboarding({ request, id } = {}) {
+  const account = await signedInAccount(request, "an onboarding");
+  if (!account) return { status: 401 };
+
+  const connection = await Connection.get(String(id));
+  if (!connection || !isOwnedBy(connection, account)) return { status: 404 };
+
+  return sendToSetup(connection);
+}
+
+async function signedInAccount(request, what) {
+  const account = await settings().currentAccount(request);
+  if (account === null || account === undefined) {
+    console.warn(`QuBe Sync: refused ${what}: currentAccount found no signed-in account (is the route behind your sign-in?)`);
+    return null;
+  }
+  return account;
+}
+
+// The connection is the account's: the same type and id the row keeps.
+function isOwnedBy(connection, account) {
+  const [type, id] = recordKey(account);
+  return connection.ownerType === type && String(connection.ownerId) === id;
+}
+
+function connectionName(name) {
+  const text = typeof name === "string" ? name.trim() : "";
+  return text === "" ? null : text.slice(0, 255);
+}
+
+// fresh: a row this request wrote, which no earlier create can have been made for.
+async function sendToSetup(connection, { fresh = false } = {}) {
+  // An earlier create that landed before its id was saved: that connection, not a second one.
+  if (!fresh && blank(connection.qubeId)) await connection.adoptQubeConnection();
+  let made;
+  if (!blank(connection.qubeId)) {
+    await client().updateConnection(connection.qubeId, { webhookUrl: connection.webhookUrl() });
+    made = await client().regenerateOnboarding(connection.qubeId);
+  } else {
+    made = await client().createConnection({ webhookUrl: connection.webhookUrl(), name: connection.name || undefined });
+    await connection.update({ qubeId: String(made.id) });
+  }
+
+  // 303, so the browser follows the POST with a GET.
+  return { status: 303, location: made.links.onboarding };
+}
+
+module.exports = { connectQuickbooks, resendOnboarding };

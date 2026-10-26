@@ -2,50 +2,166 @@
 
 const { randomUUID } = require("crypto");
 
-const { client, webhookBase } = require("./client");
+const { client, isRefused } = require("./client");
+const { NotConnected } = require("./errors");
+const { withoutNils } = require("./mapping");
+const { Connection, Run, recordKey, blank } = require("./records");
 const { settings } = require("./settings");
 
-// One way your app starts a workflow, and what it does with that run's webhooks: a subclass per
-// operation, in your app's quickbooks-desktop/ (create-invoice.js, say), listed by slug in the
-// operations setting. Each run's webhook URL names the operation and your record
-// (<webhookUrl>/<slug>/<record id>), so the job (run) hands each event back to the same class,
-// with the record found again.
+// The run fields the job writes once an event is applied: the run as of that event, and whatever
+// a handler changed on this.run.
+const RUN_EVENT_FIELDS = Object.freeze(["state", "outcome", "error", "cancelReason", "endedAt", "question", "links", "revision"]);
+
+// One way your app starts a workflow, and what it does with that run's webhooks: subclass it once
+// per operation, in your app's quickbooks-desktop/, and list it in the operations setting by its
+// slug.
 //
-// The run's reference and the last revision applied are kept on the record, in its
-// qube_reference (a string) and qube_revision (a number) fields, and a question the run asks,
-// with its links, in qube_question and qube_links (JSON) fields, written with saveRecord. A
-// record whose workflow asks nothing (a sync's) needs only the first two. Override
-// savedReference, saveReference, savedRevision and saveRevision, or savedQuestion, savedLinks and
-// saveQuestion, to keep them elsewhere.
+//   class CreateInvoice extends Operation {
+//     static workflow = "add_transaction";
+//     static slug = "create_invoice";
+//
+//     input() {
+//       return { operation: "invoice.create", params: { ref_number: this.record.number } };
+//     }
+//
+//     async ended(event) {
+//       const txn = (event.output && event.output.record) || {};
+//       await this.connection.link(this.record, { kind: "invoice", qbId: txn.txn_id,
+//                                                 editSequence: txn.edit_sequence, name: txn.ref_number });
+//     }
+//   }
+//
+//   const run = await CreateInvoice.start(invoice, connection);
+//
+// Each run is a row in qube_runs (Run), written before the run starts, and its webhook URL is
+// QUBE_WEBHOOK_URL/runs/<run id>, so the job hands each event back to the same class with the
+// record, the run and its connection found again. Your record's table needs no QuBe columns: the
+// run keeps its reference, revision, state and question, and the QuickBooks ids an ending carries
+// go on the connection (connection.link), keyed by kind.
 class Operation {
-  // Starts the operation's run for `record`, one your app has saved, on the customer's
-  // connection (the connection id onboarding saved for them), and returns the run as it stands.
-  // The reference is new for every run (<slug>-<record id>-<uuid>) and saved on the record
-  // before the run starts, since a webhook can arrive before this returns.
-  static async start(record, connectionId) {
-    const operation = new this(record);
-    const reference = `${this.slug}-${record.id}-${randomUUID()}`;
-    await operation.saveReference(reference);
-    const input = await operation.input();
-    return client().startRun(connectionId, this.workflow, input, {
-      reference,
-      webhookUrl: operation.webhookUrl(),
+  // Starts the operation's run for record, one your app has saved, on connection (a Connection
+  // the customer has finished onboarding, so it has a qubeId), and resolves to the run. The row is
+  // written first, with a new reference (<slug>-<record id>-<uuid>) and state "starting", since a
+  // webhook can arrive before this returns, and keeps the input it was started with.
+  //
+  // The reference is also the Idempotency-Key. When QuBe Sync refuses the start (a 4xx: bad
+  // input, a workflow that isn't published) or the input throws, the row is marked "failed" and
+  // the error thrown: nothing was started, and starting again makes a new run. When the start
+  // gets no answer (a timeout, a 5xx, a dropped connection) it may have started, so the row stays
+  // "starting" and the error is thrown: send it again with run.retryStart(), never a new start, or
+  // a run that did start runs twice (two invoices).
+  static async start(record, connection) {
+    if (!Operation.#madeByQubeSync(connection)) {
+      throw new NotConnected(
+        `QuBe Sync: ${this.name}.start needs a connection QuBe Sync has made (one with a qubeId): the customer finishes onboarding first`
+      );
+    }
+
+    const on = connection instanceof Connection ? connection : new Connection(connection);
+    const [type, id] = recordKey(record);
+    const row = await on.store.createRun({
+      connectionId: on.id,
+      operation: this.slug,
+      recordType: type,
+      recordId: id,
+      reference: `${this.slug}-${id}-${randomUUID()}`,
+      state: "starting",
+      revision: 0,
     });
+    const run = new Run(row, on.store, on);
+    let input;
+    try {
+      // As JSON reads it back, so a retry sends exactly what the first start did.
+      input = asJson(await new this(record, run).input());
+    } catch (err) {
+      await Operation.#markFailed(run);
+      throw err;
+    }
+    await run.update({ input });
+    return Operation.#sendStart.call(this, run, input);
   }
 
-  // Your record, by the id in its webhook URL. Each operation says how.
+  // Sends a start that got no answer again (run.retryStart() calls it): the same reference as the
+  // Idempotency-Key, the same workflow, input and webhook URL. QuBe Sync answers a repeat of a
+  // start it took with the run that start made (201, Idempotent-Replayed: true) rather than
+  // starting another, for as long as that run is kept (60 days after it ends); a start it never
+  // took starts now. Resolves to the run; a run already answered is returned as it is.
+  static async retryStart(run) {
+    if (!blank(run.qubeRunId)) return run;
+    if (run.state !== "starting") {
+      throw new TypeError(`QuBe Sync: run ${run.id} is ${run.state}: only a start that got no answer is sent again`);
+    }
+
+    return Operation.#sendStart.call(this, run, run.input);
+  }
+
+  static async #sendStart(run, input) {
+    let started;
+    try {
+      started = await client().startRun(run.connection.qubeId, this.workflow, input === null ? undefined : input, {
+        reference: run.reference,
+        webhookUrl: run.webhookUrl(),
+      });
+    } catch (err) {
+      if (isRefused(err)) await Operation.#markFailed(run); // refused: nothing started
+      throw err;
+    }
+    await Operation.#recordStart(run, started !== null && typeof started === "object" ? started : {});
+    return run;
+  }
+
+  static async #markFailed(run) {
+    await run.update({ state: "failed" });
+  }
+
+  // The run's id, links and state from QuBe Sync's answer. Its webhooks may have come first, so
+  // the state is taken only while the row still says "starting".
+  static async #recordStart(run, started) {
+    const links = started.links !== null && typeof started.links === "object" ? started.links : {};
+    const row = await run.store.withRunLock(run.id, (tx, locked) => {
+      const changes = { qubeRunId: started.id === undefined ? null : started.id, runUrl: links.run || null, cancelUrl: links.cancel || null };
+      if (locked.state === "starting" && started.state) changes.state = started.state;
+      return tx.updateRun(run.id, changes);
+    });
+    Object.assign(run, row);
+  }
+
+  // A Connection QuBe Sync has made: one with a qubeId.
+  static #madeByQubeSync(connection) {
+    return connection !== null && typeof connection === "object" && !blank(connection.id) && !blank(connection.qubeId);
+  }
+
+  // Your record, by the id its run keeps (a string). Leave it out and the run finds it with the
+  // findRecord setting, by its recordType; write it to load what input and the handlers read with
+  // it:
+  //   static async findRecord(id) {
+  //     return Invoice.findByPk(id, { include: ["lines"] });
+  //   }
   static async findRecord(id) {
-    throw new Error(`${this.name}.findRecord(${JSON.stringify(id)}) isn't written yet`);
+    throw new Error(`${this.name}.findRecord(${JSON.stringify(id)}) isn't written: leave it out to find the record with the findRecord setting`);
   }
 
-  constructor(record) {
+  /** The run's record: findRecord when the operation writes one, else the findRecord setting's. */
+  static async recordFor(run) {
+    const record = this.findRecord === Operation.findRecord ? await settings().findRecord(run.recordType, run.recordId) : await this.findRecord(String(run.recordId));
+    return record === undefined ? null : record;
+  }
+
+  constructor(record, run) {
     this.record = record;
+    this.run = run || null;
   }
 
-  // Where this run's webhooks go: the webhookUrl setting, then the operation and the record's id.
-  webhookUrl() {
-    const { slug } = this.constructor;
-    return `${webhookBase()}/${slug}/${encodeURIComponent(String(this.record.id))}`;
+  // The connection the run is on (a Connection): where the QuickBooks ids an ending carries are
+  // kept (connection.link), and where the ones the input names are read (connection.qbIdFor).
+  get connection() {
+    return this.run ? this.run.connection : null;
+  }
+
+  // The store the run is kept in: inside a handler, the run lock's transaction, so what your
+  // handler writes through it is saved with the run or not at all.
+  get store() {
+    return this.run ? this.run.store : settings().store;
   }
 
   // The run's input, from the record. Each operation says how.
@@ -54,67 +170,51 @@ class Operation {
   }
 
   // One of the run's webhooks, from the job, as qubesync parsed it: a WorkflowRunEvent or a
-  // NotificationEvent. Deliveries come at least once and, from a queue with more than one
-  // worker, in any order:
-  // - an event whose reference isn't the one saved on the record isn't this record's run (an
-  //   earlier run's, or a signed body posted to another record's URL): it's logged and skipped;
-  // - a notification is taken once, by its delivery_id, through the dedupe setting;
+  // NotificationEvent. Deliveries come at least once and, from a queue with more than one worker,
+  // in any order:
+  // - an event whose reference isn't the run's, or whose connection_id isn't its connection's
+  //   qubeId (a signed body posted to another run's URL), is logged and skipped;
+  // - a notification is taken once, by its delivery_id (in qube_notifications, with what the
+  //   handler writes);
   // - any other event is applied only when its revision is newer than the last one applied.
-  // With more than one worker, take a row lock on the record around it (SELECT ... FOR UPDATE)
-  // so two workers never apply one record's events at once.
+  // It holds the run row's lock while it does (withRunLock, which reads it again), so two workers
+  // never apply one run's events at once, and what a handler writes through the store is saved
+  // with the revision or not at all.
   async handle(event) {
-    const saved = await this.savedReference();
-    if (!event.reference || event.reference !== saved) {
-      const { name } = this.constructor;
-      const of = JSON.stringify(event.reference);
-      console.warn(`QuBe Sync: ${name} ${this.record.id} skipped ${event.event} for ${of}: not its run`);
+    const base = this.run.store;
+    const applied = await base.withRunLock(this.run.id, async (tx, row) => {
+      if (!row) return null; // deleted since the job found it
+      const connection = await tx.getConnection(row.connectionId);
+      this.run = new Run(row, tx, connection ? new Connection(connection, tx) : null);
+      await this.#apply(event, tx);
+      return { run: this.run, connection };
+    });
+    if (!applied) {
+      console.warn(`QuBe Sync: dropped ${event.event || event.type}: run ${this.run.id} isn't there (deleted since, so it can't be applied)`);
       return;
     }
-
-    if (event.type === "notification") {
-      const id = String(event.dedupeKey); // its delivery_id
-      const { dedupe } = settings();
-      if (await dedupe.seen(id)) return; // a retry of one already taken
-      await this.notification(event);
-      await dedupe.remember(id);
-      return;
-    }
-
-    // Only a run's events and its notifications carry a reference.
-    if (event.type !== "workflow_run") return;
-    // Applied already, or older than what was.
-    if (!event.newerThan(await this.savedRevision())) return;
-
-    switch (event.event) {
-      case "workflow_run.awaiting_input":
-        await this.question(event);
-        break;
-      case "workflow_run.completed":
-        await this.ended(event);
-        break;
-      case "workflow_run.failed":
-      case "workflow_run.cancelled":
-        await this.failed(event);
-        break;
-    }
-    // A newer event that isn't a question: the one saved was answered, or the run ended.
-    const asking = event.event === "workflow_run.awaiting_input";
-    if (!asking && (await this.savedQuestion())) await this.saveQuestion(null, null);
-    await this.saveRevision(event.revision);
+    // Outside the lock, the run is read through the store again.
+    const { run, connection } = applied;
+    this.run = new Run({ ...run }, base, connection ? new Connection(connection, base) : null);
   }
 
-  // A question the run asks: saved whole on the record, with its links (where to answer it, and
-  // where a record field searches), for renderQuestion to show on the record's page. Your user's
-  // choice answers it, through the question routes: nothing here picks one, and the run waits
-  // for as long as it takes. A newer event that isn't a question forgets it.
+  // A question the run asks: kept whole on the run, with its links (where to answer it, and where
+  // a record field searches), for renderQuestion to show on the record's page. Your user's choice
+  // answers it, through the question routes: nothing here picks one, and the run waits for as long
+  // as it takes. A newer event that isn't a question forgets it.
   async question(event) {
-    if (!event.prompt) return; // answered already: this delivery was a retry
+    const prompt = event.prompt;
+    if (!prompt) return; // answered already: this delivery was a retry
+
     const links = event.links || {};
-    await this.saveQuestion(event.prompt, { decisions: links.decisions, search: links.search || null });
+    this.run.question = prompt;
+    this.run.links = { decisions: links.decisions === undefined ? null : links.decisions, search: links.search === undefined ? null : links.search };
   }
 
   // What an operation does with the rest of its run's events: each operation says, and until it
-  // does, each logs.
+  // does, each logs. The kit has already kept every ending on the run (state, outcome, error,
+  // cancelReason, endedAt: renderRunStatus shows it), so these are for your own records: an
+  // invoice marked sent, a sync's last-finished time.
 
   async notification(event) {
     this.logEvent(event);
@@ -128,75 +228,175 @@ class Operation {
     this.logEvent(event);
   }
 
-  async savedReference() {
-    return this.record.qube_reference;
+  // How the input refers to one of your records in QuickBooks: { list_id } when it's linked on
+  // this run's connection (connection.qbIdFor), else { full_name: name }, or null when there's
+  // neither. Refer by id where you can: a name can match another record, or none after a rename.
+  //   customer_ref: await this.quickbooksRef(this.record.customer, { kind: "customer", name: get(this.record, "customer", "name") })
+  async quickbooksRef(appRecord, { kind, name = null } = {}) {
+    const listId = appRecord === null || appRecord === undefined ? null : await this.connection.qbIdFor(appRecord, { kind });
+    if (listId) return { list_id: listId };
+    if (blank(name)) return null;
+
+    return { full_name: name };
   }
 
-  // Saves a new run's reference and forgets the last run's revision, since each run's revisions
-  // start again at 1, and any question it was asking.
-  async saveReference(reference) {
-    this.record.qube_reference = reference;
-    this.record.qube_revision = 0;
-    if (this.record.qube_question) {
-      this.record.qube_question = null;
-      this.record.qube_links = null;
+  // Links each QuickBooks record an ending carries (event.output.references, keyed by the input's
+  // path: "customer_ref", "invoice_line_add.0.item_ref") to the record of yours your function
+  // returns for it, on this run's connection, so the next run refers to it by id. The function
+  // gets the path and the entry (kind, outcome and record: the record's own list as "type", with
+  // list_id, edit_sequence and full_name) and returns your record, or null to skip it. An entry
+  // with no record (not found, or not reached before a cancel) is skipped. Works on an added
+  // ending and on a cancelled one, which can carry some. Resolves to the rows linked.
+  //   await this.linkReferences(event, (path, entry) => (path === "customer_ref" ? this.record.customer : null));
+  async linkReferences(event, recordFor) {
+    const output = event.output !== undefined ? event.output : event.body && event.body.output;
+    const references = isObject(output) ? output.references : null;
+    if (!isObject(references)) return [];
+
+    const linked = [];
+    for (const [path, entry] of Object.entries(references)) {
+      if (!isObject(entry) || !isObject(entry.record)) continue;
+
+      const found = entry.record;
+      if (blank(found.list_id)) continue;
+
+      const appRecord = await recordFor(path, entry);
+      if (appRecord === null || appRecord === undefined) continue;
+
+      const kind = blank(found.type) ? entry.kind : found.type;
+      linked.push(await this.connection.link(appRecord, { kind, qbId: found.list_id, editSequence: found.edit_sequence, name: found.full_name }));
     }
-    await this.saveRecord();
-  }
-
-  async savedRevision() {
-    return this.record.qube_revision;
-  }
-
-  async saveRevision(revision) {
-    this.record.qube_revision = revision;
-    await this.saveRecord();
-  }
-
-  // The question the run is asking, as its webhook's prompt had it, or null.
-  async savedQuestion() {
-    return this.record.qube_question || null;
-  }
-
-  // Its links: decisions and, for a record field, search.
-  async savedLinks() {
-    return this.record.qube_links || null;
-  }
-
-  async saveQuestion(prompt, links) {
-    this.record.qube_question = prompt;
-    this.record.qube_links = links;
-    await this.saveRecord();
+    return linked;
   }
 
   // After your user's choice is in: the question is forgotten, unless the run has asked another
   // since (its token is the question's own).
   async answered(token) {
-    const question = await this.savedQuestion();
-    if (question && question.token === token) await this.saveQuestion(null, null);
+    const row = await this.run.store.withRunLock(this.run.id, (tx, locked) => {
+      const question = locked ? new Run(locked).openQuestion() : null;
+      if (!question || question.token !== token) return locked;
+      return tx.updateRun(locked.id, { question: null, links: null });
+    });
+    if (row) Object.assign(this.run, row);
   }
 
-  // Writes the record's qube_ fields with its save(), as Sequelize's, Mongoose's and TypeORM's
-  // records have it. Override it for another ORM (Prisma's update, say).
-  async saveRecord() {
-    if (!this.record || typeof this.record.save !== "function") {
-      throw new Error(`${this.constructor.name}'s saveRecord: this record has no save(), so override saveRecord`);
-    }
-    await this.record.save();
+  // The input without its null and undefined values, at every depth: what a mapped operation's
+  // input sends, so a field your record doesn't have yet is left out rather than sent as null.
+  withoutNils(value) {
+    return withoutNils(value);
   }
 
   // All a handler does until you fill it in.
   logEvent(event) {
-    const { name } = this.constructor;
     const body = event.body || {};
-    const detail = (body.prompt && body.prompt.id) || body.name || body.outcome;
-    const line = `QuBe Sync: ${name} ${this.record.id}: ${event.event} ${detail} (${event.reference})`;
-    if (event.event === "workflow_run.failed" || event.event === "workflow_run.cancelled") {
+    const detail = (isObject(body.prompt) && body.prompt.id) || body.name || body.outcome;
+    const line = `QuBe Sync: ${this.constructor.name} ${this.record && this.record.id} (run ${this.run && this.run.id}): ${event.event} ${detail} (${event.reference})`;
+    if (event.type === "workflow_run" && Operation.#stopped(event)) {
       console.warn(line);
     } else {
       console.log(line);
     }
   }
+
+  // Only a run's events and its notifications carry a reference: any other event posted to this
+  // URL is skipped with the rest that aren't this run's.
+  async #apply(event, tx) {
+    const { run } = this;
+    if (!this.#thisRun(event)) {
+      const on = event.body && event.body.connection_id;
+      console.warn(
+        `QuBe Sync: ${this.constructor.name} run ${run.id} skipped ${event.event} for ${JSON.stringify(event.reference)} on ${JSON.stringify(on === undefined ? null : on)}: not this run`
+      );
+      return;
+    }
+
+    if (event.type === "notification") {
+      // Taken once per delivery_id, its row written in this lock's transaction: the row and the
+      // handler's writes commit together, or neither does.
+      const deliveryId = event.deliveryId === null || event.deliveryId === undefined ? "" : String(event.deliveryId);
+      await tx.once(run.id, deliveryId, () => this.notification(event));
+      return;
+    }
+    if (event.type !== "workflow_run") return;
+    // Applied already, or older than what was.
+    if (!event.newerThan(run.revision)) return;
+
+    // The run as of this event, before your handler runs, so every ending is on the run row
+    // whatever the handler does: state, outcome, and a failure's error or a cancel's reason.
+    run.state = event.runState || this.#runStateFor(event);
+    run.outcome = event.outcome;
+    if (Operation.#ended(event)) {
+      run.endedAt = run.endedAt || new Date();
+      if (event.event === "workflow_run.failed") run.error = event.error;
+      if (event.event === "workflow_run.cancelled") run.cancelReason = event.cancelReason;
+    }
+
+    const asking = event.event === "workflow_run.awaiting_input";
+    if (asking) {
+      await this.question(event);
+    } else if (event.event === "workflow_run.completed") {
+      await this.ended(event);
+    } else if (Operation.#stopped(event)) {
+      await this.failed(event);
+    }
+    // A newer event that isn't a question: the one saved was answered, or the run ended.
+    if (!asking) {
+      run.question = null;
+      run.links = null;
+    }
+    run.revision = event.revision;
+    const changes = {};
+    for (const field of RUN_EVENT_FIELDS) changes[field] = run[field] === undefined ? null : run[field];
+    Object.assign(run, await tx.updateRun(run.id, changes));
+  }
+
+  // The event names this run: its reference, on its connection.
+  #thisRun(event) {
+    return this.#sameReference(event) && this.#onThisConnection(event);
+  }
+
+  #sameReference(event) {
+    return !blank(event.reference) && event.reference === this.run.reference;
+  }
+
+  #onThisConnection(event) {
+    const qubeId = this.run.connection && this.run.connection.qubeId;
+    return !blank(qubeId) && event.body && event.body.connection_id === qubeId;
+  }
+
+  // The run is over: completed, failed or cancelled.
+  static #ended(event) {
+    return event.event === "workflow_run.completed" || Operation.#stopped(event);
+  }
+
+  // The run ended without completing: failed or cancelled, which the failed handler takes.
+  static #stopped(event) {
+    return event.event === "workflow_run.failed" || event.event === "workflow_run.cancelled";
+  }
+
+  #runStateFor(event) {
+    switch (event.event) {
+      case "workflow_run.awaiting_input":
+        return "awaiting_input";
+      case "workflow_run.completed":
+        return "completed";
+      case "workflow_run.failed":
+        return "failed";
+      case "workflow_run.cancelled":
+        return "cancelled";
+      default:
+        return this.run.state;
+    }
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// A value as JSON reads it back (undefined as null).
+function asJson(value) {
+  return value === undefined ? null : JSON.parse(JSON.stringify(value));
 }
 
 module.exports = { Operation };
