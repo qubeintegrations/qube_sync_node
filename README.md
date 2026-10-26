@@ -490,7 +490,8 @@ An event can come before the row has its `qubeId`: a simulated connection sends
 QuBe Sync's connection made with the row's webhook URL and keeps its id, or throws `NotReady`, so
 the job tries again shortly. Connect does the same for a row left without an id (a crash between
 the create and the save), so one row never gets two connections. Adopting lists the app's
-connections and takes only the one with the row's webhook URL that has never connected, was made at
+connections and takes only the one with the row's webhook URL that has never connected, or is simulated (a
+simulated connection connects as it's made, so nobody else can have set it up), was made at
 or after the row (its `created_at`, with five minutes allowed for clock difference), and has the
 row's name when the row has one; if two qualify it takes neither, and one with no `created_at` is
 never adopted.

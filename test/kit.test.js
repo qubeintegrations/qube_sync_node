@@ -327,10 +327,17 @@ describe("kit: adopting QuBe Sync's connection for a row without a qubeId", () =
     assert.match(loggedText(), /carry no created_at, so none is adopted/);
   });
 
-  it("skips one that has connected", async () => {
+  it("skips a standard connection that has connected", async () => {
     const connection = await row();
-    answer(data([qubeConnectionFor(connection, { last_connected_at: "2026-10-25T12:00:00Z" })]));
+    answer(data([qubeConnectionFor(connection, { type: "standard", last_connected_at: "2026-10-25T12:00:00Z" })]));
     assert.strictEqual(await connection.adoptQubeConnection(), null);
+  });
+
+  it("adopts a simulated connection, which has a last_connected_at from the moment it's made", async () => {
+    const connection = await row();
+    answer(data([qubeConnectionFor(connection, { type: "simulated", last_connected_at: new Date().toISOString() })]));
+    assert.strictEqual(await connection.adoptQubeConnection(), "conn-q-lost");
+    assert.strictEqual((await kit.Connection.get(connection.id)).qubeId, "conn-q-lost");
   });
 
   it("skips one whose name isn't the row's, and takes any name when the row has none", async () => {

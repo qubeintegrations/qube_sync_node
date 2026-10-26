@@ -118,9 +118,9 @@ class Connection {
   // Saves and returns the id, or null, so a second connection is never made for one row.
   //
   // It lists the app's connections (GET /api/v2/connections, which isn't paged) and adopts one
-  // only when exactly one has this row's webhook URL, has never connected (last_connected_at is
-  // null), was made at or after this row (its created_at), and has the row's name when the row
-  // has one. So a row id used again (MySQL 5.7 after a restart, a restored database) never takes
+  // only when exactly one has this row's webhook URL, is unclaimed (it has never connected, or
+  // it's simulated: a simulated connection connects as it's made), was made at or after this row
+  // (its created_at), and has the row's name when the row has one. So a row id used again (MySQL 5.7 after a restart, a restored database) never takes
   // an old connection. A connection with no created_at (a server from before v2 sent it) is never
   // adopted. The listing only runs for a row without an id, which is rare.
   async adoptQubeConnection() {
@@ -247,7 +247,7 @@ class Connection {
   #madeForThisRow(made) {
     if (blank(made.id)) return false;
     if (!this.#sameUrl(made)) return false;
-    if (made.last_connected_at !== null && made.last_connected_at !== undefined) return false;
+    if (!this.#unclaimed(made)) return false;
     if (!blank(this.name) && made.name !== this.name) return false;
 
     const madeAt = parseTime(made.created_at);
@@ -255,6 +255,12 @@ class Connection {
     if (!madeAt || !rowAt) return false;
 
     return madeAt.getTime() >= rowAt.getTime() - Connection.CLOCK_SKEW_SECONDS * 1000;
+  }
+
+  // Nobody can have set it up: it has never connected, or it's simulated and connected itself when
+  // it was made. Either way, only the lost answer to the create carried its setup link.
+  #unclaimed(made) {
+    return made.last_connected_at === null || made.last_connected_at === undefined || made.type === "simulated";
   }
 
   async #onlyOne(where, what) {

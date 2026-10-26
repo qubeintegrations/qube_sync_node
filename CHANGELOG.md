@@ -32,7 +32,9 @@ QuickBooks ids live in the kit's own tables, and the app's tables need no QuBe c
   `logEvent`; handlers see `record`, `run`, `connection` and `store`.
 - **`ConnectionEvents`** (`connected`, `setupCancelled`, `stalled`, `resumed`; `connection`,
   `owner()`): status, stall reason and revision applied under `withConnectionLock`; a row with no
-  `qubeId` adopts QuBe Sync's connection made for it or throws `NotReady` for a retry.
+  `qubeId` adopts QuBe Sync's connection made for it (its webhook URL, never connected or
+  simulated, made at or after the row, five minutes' clock difference allowed) or throws
+  `NotReady` for a retry.
 - **Settings**: `store`, `operations`, `connectionEvents`, `currentAccount`, `authorizeQuestion`
   (default: the signed-in account owns the run's connection, by type and id; with neither it nor
   `currentAccount` set, `NotConfigured` naming the config file), `recordType`, `findRecord`, `enqueue` (default: `job()` in
