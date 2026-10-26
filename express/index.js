@@ -265,6 +265,14 @@ function questions(options) {
   return router;
 }
 
+/**
+ * Back to the page the request came from (303), with error, if any, kept for takeError: for your
+ * own routes, such as a start button's.
+ */
+function redirectBack(req, res, error = null) {
+  return send(req, res, { status: 303, error });
+}
+
 // The page the request came from, when it's this app's; else /.
 function back(req) {
   const referer = req.get("Referer");
@@ -276,4 +284,4 @@ function back(req) {
   return "/";
 }
 
-module.exports = { webhooks, connect, questions, takeError };
+module.exports = { webhooks, connect, questions, takeError, redirectBack };

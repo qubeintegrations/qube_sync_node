@@ -9,6 +9,8 @@ From the qube_rails walkthrough and the owner's review (2026-10-26):
 - **`Client#redeliverRun(connectionId, runId)`**: `POST .../workflow-runs/{id}/redeliver`, which has
   QuBe Sync send the run's latest event again; resolves to `{ run_id, event, revision, webhook_url }`
   (409 nothing to send yet, 429 asked too soon).
+- **`redirectBack(req, res, error)`** (`qubesync/express`) and **`isNoAnswer(err)`** (`qubesync/kit`):
+  for your own routes, such as a start button's, to go back with a message the page shows once.
 - **Simulated connect**: `POST quickbooks/connections` with `simulated=1` (`connectQuickbooks({
   simulated: true })`), outside production (`NODE_ENV`), makes a new row, a simulated connection with
   its webhook URL, saves its `qubeId` and goes back to the page; 404 in production.

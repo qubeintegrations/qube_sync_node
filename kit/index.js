@@ -12,7 +12,7 @@ const settingsModule = require("./settings");
 const errors = require("./errors");
 const store = require("./store");
 const { memoryStore } = require("./memory-store");
-const { client } = require("./client");
+const { client, isNoAnswer } = require("./client");
 const { Connection, Run, recordKey } = require("./records");
 const { SyncStatus } = require("./sync-status");
 const { Operation } = require("./operation");
@@ -48,6 +48,7 @@ module.exports = {
   familyFor: store.familyFor,
   // The API
   client,
+  isNoAnswer,
   // Rows
   Connection,
   Run,

@@ -816,6 +816,24 @@ describe("express: takeError", () => {
   });
 });
 
+describe("express: redirectBack", () => {
+  it("goes back to the page with the message for takeError", async () => {
+    const made = express();
+    made.post("/start", (req, res) => qube.redirectBack(req, res, "Connect first."));
+    made.get("/invoices/1", (req, res) => res.type("text/html").send(kit.renderRunStatus(null, { error: qube.takeError(req, res) })));
+    const back = await request(made, { method: "POST", path: "/start", headers: { Referer: "/invoices/1" } });
+    assert.strictEqual(back.status, 303);
+    assert.strictEqual(back.headers.location, "/invoices/1");
+    const cookie = back.headers["set-cookie"][0].split(";")[0];
+    const shown = await request(made, { path: "/invoices/1", headers: { cookie } });
+    assert.strictEqual(shown.text, '<p class="qube-error">Connect first.</p>');
+    made.post("/fine", (req, res) => qube.redirectBack(req, res));
+    const fine = await request(made, { method: "POST", path: "/fine", headers: { Referer: "https://elsewhere.example/x" } });
+    assert.strictEqual(fine.headers.location, "/");
+    assert.strictEqual(fine.headers["set-cookie"], undefined);
+  });
+});
+
 describe("express: mounting", () => {
   it("serves the routes relative to where they're mounted, and passes settings to configure", async () => {
     reset();

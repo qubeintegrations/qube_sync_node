@@ -37,3 +37,6 @@ export declare function questions(options?: RouterOptions<QuestionsOptions> | Se
  * it to renderRunStatus or renderQuestion as error.
  */
 export declare function takeError(req: Request, res: Response): string | null;
+
+/** Back to the page the request came from (303), with error, if any, kept for takeError: for your own routes, such as a start button's. */
+export declare function redirectBack(req: Request, res: Response, error?: string | null): void;

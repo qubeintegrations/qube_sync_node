@@ -330,6 +330,8 @@ export declare function resetSettings(): void;
 
 /** The configured Client (apiKey, baseUrl), made once, with the retry log. */
 export declare function client(): Client;
+/** True for a request QuBe Sync never answered (a network error or timeout), not a refusal. */
+export declare function isNoAnswer(err: unknown): boolean;
 
 /** [type, id] as a row keeps a record: the recordType setting's type, and the id as a string. */
 export declare function recordKey(record: QubeRecord): [string, string];
