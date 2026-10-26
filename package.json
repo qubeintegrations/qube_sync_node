@@ -43,11 +43,18 @@
       "import": "./express/index.mjs",
       "require": "./express/index.js"
     },
+    "./workflow-types": {
+      "types": "./workflow-types/index.d.ts",
+      "default": "./workflow-types/index.js"
+    },
     "./operations/*": {
       "types": "./operations/*.d.ts",
       "default": "./operations/*.js"
     },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "qubesync": "bin/qubesync.js"
   },
   "files": [
     "index.js",
@@ -55,6 +62,8 @@
     "operations/",
     "kit/",
     "express/",
+    "workflow-types/",
+    "bin/",
     "index.mjs",
     "index.d.ts",
     "README.md",
@@ -65,8 +74,8 @@
     "node": ">=16.17"
   },
   "scripts": {
-    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs test/kit.test.js test/store.test.js test/express.test.js test/kit-esm.test.mjs",
-    "test:types": "tsc --noEmit --strict --module node16 --moduleResolution node16 --target es2020 test/types.ts test/kit-types.ts",
+    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs test/kit.test.js test/store.test.js test/express.test.js test/kit-esm.test.mjs test/workflow-types.test.js",
+    "test:types": "tsc --noEmit --strict --module node16 --moduleResolution node16 --target es2020 test/types.ts test/kit-types.ts test/workflow-types.ts",
     "generate": "node scripts/generate-operations.js",
     "generate:check": "node scripts/generate-operations.js --check"
   },
