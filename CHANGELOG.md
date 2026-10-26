@@ -2,22 +2,51 @@
 
 ## 0.3.0 (unreleased)
 
-The integration kit's foundation, so an Express app keeps only its own code (a config, operation
-classes, a connection class) and updates the rest with `npm update`.
+The integration kit's foundation, so an Express app keeps only its own code (a config, a store,
+operation classes, a connection events class) and updates the rest with `npm update`. The same
+design as the qube_rails engine: connections are records (an account can have several), runs and
+QuickBooks ids live in the kit's own tables, and the app's tables need no QuBe columns.
 
-- `qubesync/kit`, framework-free: `configure(settings)` / `settings()` (operations, connection,
-  currentAccount, authorizeQuestion, enqueue, dedupe, apiKey, baseUrl, webhookSecret, webhookUrl;
-  an unset one throws at first use naming the config file, the secrets fall back to the
-  environment and never show in `inspect` or JSON); the `Operation` and `ConnectionEvents` bases
-  (reference, revision and delivery-id checks, questions saved and forgotten, `saveRecord`);
-  `run(job)`; `receiveWebhook`, `startOnboarding`, `answerQuestion` and `searchQuestion`;
-  `renderQuestion` with `escapeHtml` and `SEARCH_SCRIPT`; the mapping helpers (`get`, `rows`,
-  `dig`, `asString`, `asNumber`, `asInteger`, `asDate`, `withoutNils`); `client()`.
-- `qubesync/express`, for Express 4 and 5 (an optional peer dependency): the `webhooks()`,
-  `connect()` and `questions()` routers.
-- Unset, `authorizeQuestion` refuses every answer and search with a 403 and logs why (anything it
-  returns but `true` is a 404); `enqueue` runs jobs in
-  the process after the response, and `dedupe` keeps delivery ids in memory, each warning once.
+- **The store.** `qubesync/kit` defines a store interface (async: `transaction`;
+  `createConnection`, `getConnection`, `updateConnection`, `ownedBy`, `withConnectionLock`;
+  `createRun`, `getRun`, `updateRun`, `latestRun`, `withRunLock`; `once`; `findQuickbooksRecords`,
+  `createQuickbooksRecord`, `updateQuickbooksRecord`, `deleteQuickbooksRecord`), with
+  `memoryStore()` for tests, `qubesync/kit/schema.sql` (qube_rails' four tables:
+  `qube_connections`, `qube_runs`, `qube_notifications`, `qube_quickbooks_records`, with their
+  unique keys and indexes; PostgreSQL, with notes for MySQL and SQLite), `STORE_COLUMNS`, and the
+  conformance suite `qubesync/kit/store-tests`. A unique-key clash throws `StoreConflict`.
+- **`Connection`** (`get`, `ownedBy`, `create`, `webhookUrl`, `connected`, `notCheckingIn`,
+  `owner`, `update`, `adoptQubeConnection`) and its QuickBooks ids (`link`, `qbIdFor`,
+  `findLinked`, `quickbooksRecord`), unique per connection and list family (`familyFor`): an id
+  linked to another record moves (logged), the record's old link gives way, and the item family
+  falls back across item kinds but the name family never does.
+- **`Run`** (`get`, `load`, `latestFor`, `retryStart`, `ended`, `failed`, `cancelled`,
+  `unconfirmed`, `summaryText`, `cancelReasonText`, `errorMessage`, `errorDetail`, `openQuestion`),
+  with every ending kept on the row before the handler runs.
+- **`Operation`**: `start(record, connection)` writes the run first ("starting"), refuses a
+  connection with no `qubeId` (`NotConnected`), marks a 4xx or a throwing input "failed", and
+  leaves a start with no answer "starting" for `retryStart` (the same reference as the
+  Idempotency-Key). `handle` checks the reference and `connection_id` against the run, takes a
+  notification once (`once`, in the run lock's transaction) and applies anything else when it's
+  newer, under `withRunLock`. `quickbooksRef`, `linkReferences`, `answered`, `withoutNils`,
+  `logEvent`; handlers see `record`, `run`, `connection` and `store`.
+- **`ConnectionEvents`** (`connected`, `setupCancelled`, `stalled`, `resumed`; `connection`,
+  `owner()`): status, stall reason and revision applied under `withConnectionLock`; a row with no
+  `qubeId` adopts QuBe Sync's connection made for it or throws `NotReady` for a retry.
+- **Settings**: `store`, `operations`, `connectionEvents`, `currentAccount`, `authorizeQuestion`
+  (default: the signed-in account owns the run's connection, by type and id; with neither it nor
+  `currentAccount` set, a logged 403), `recordType`, `findRecord`, `enqueue` (default: `job()` in
+  this process), `jobAttempts` (10), `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl`. An unset
+  one throws `NotConfigured` naming the config file; the secrets never show.
+- **The routes' work**, framework-free: `receiveWebhook` (200, 400, 401, 404, 413, 503), `run`,
+  `job` (retries with a growing wait), `connectQuickbooks`, `resendOnboarding`, `answerQuestion`,
+  `searchQuestion`, `retryStart`; `renderQuestion(run)` and `renderRunStatus(run)` with
+  `escapeHtml` and `SEARCH_SCRIPT`; the mapping helpers; `client()`.
+- **`qubesync/express`**, for Express 4 and 5 (an optional peer dependency): `webhooks()`
+  (`POST webhooks/qube/runs/:id`, `POST webhooks/qube/connections/:id`), `connect()`
+  (`POST quickbooks/connections`, `POST quickbooks/connections/:id/onboarding`) and `questions()`
+  (`POST qube/questions/runs/:id`, `GET qube/questions/runs/:id/search`,
+  `POST qube/runs/:id/retry_start`).
 
 ## 0.2.0 (2026-10-25)
 

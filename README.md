@@ -4,7 +4,7 @@ The [QuBe Sync](https://qubesync.com) v2 API client, and webhook verification an
 QuickBooks Desktop through qubesync.com. Plain JavaScript, zero dependencies, Node 16.17 and
 later, CommonJS and ESM, TypeScript declarations included. API docs: https://docs.qubesync.com.
 For an Express app, [the integration kit](#the-integration-kit-qubesynckit-and-qubesyncexpress) is
-the webhook endpoint, onboarding and the question routes, ready to mount.
+the webhook endpoint, onboarding, the question routes and the tables behind them, ready to mount.
 
 ```bash
 npm install qubesync
@@ -310,12 +310,24 @@ app.post("/webhooks/qube", express.raw({ type: "application/json" }), (req, res)
 
 ## The integration kit: `qubesync/kit` and `qubesync/express`
 
-Everything an Express app's QuBe Sync integration has that's the same in every app: the webhook
-endpoint and its job, onboarding, the question routes and their HTML, and the `Operation` and
-`ConnectionEvents` bases with their reference, revision and delivery-id checks. Your app keeps only
-its own code, in `quickbooks-desktop/`: one config file, an operation class per way it starts a
-workflow, and a connection class. `npm update qubesync` updates the rest; don't copy it into your
-app. `qubesync/kit` is framework-free; `qubesync/express` mounts it in Express 4 or 5.
+Everything an Express app's QuBe Sync integration has that's the same in every app:
+
+- tables of its own, kept through your app's **store**: your customers' **connections** (an
+  account can have several, one per company file), the **runs** your app starts, the
+  notifications each run has taken, and the **QuickBooks ids** it learns, each kept against its
+  connection;
+- onboarding: make a connection for the signed-in account, or send one of its connections back
+  through QuBe Sync's setup;
+- the webhook endpoint (verify the signature, find the row, enqueue) and its job (check the event
+  is that run's or that connection's, apply it, call your handler);
+- the question routes (answer by choice, search a record field), a start sent again, and their
+  HTML;
+- `Operation` and `ConnectionEvents`, the bases of your classes.
+
+Your app keeps its own code, which this package never names, in `quickbooks-desktop/`: one config
+file, a store, an operation class per way it starts a workflow, and a class for a connection's
+events. Your own tables need no QuBe columns. `npm update qubesync` updates the rest; don't copy it
+into your app. `qubesync/kit` is framework-free; `qubesync/express` mounts it in Express 4 or 5.
 
 ```bash
 npm install "qubesync@>=0.3.0" express
@@ -326,49 +338,92 @@ The environment, read at first use: `QUBE_API_KEY`, `QUBE_URL` (default `https:/
 every run's and connection's webhook URL: `qube listen --write-env .env` writes it in development,
 and in production it's your app's `/webhooks/qube`.
 
+### The store: `quickbooks-desktop/store.js`
+
+Node has no standard ORM, so the kit says what a store does and your app's store does it, on your
+database and your query builder. The integration kit generates one for your stack; `memoryStore()`
+is one for tests. A store is plain reads and writes, each async; what they mean (an id that moves
+between records, the item family's fallback, a notification taken once) is the kit's, above the
+store, so every store behaves alike.
+
+The tables are `qubesync/kit/schema.sql` (PostgreSQL, with notes for MySQL and SQLite):
+`qube_connections`, `qube_runs`, `qube_notifications` and `qube_quickbooks_records`, the same as
+qube_rails' migration. Rows are camelCase in JavaScript (`STORE_COLUMNS` maps each field to its
+column); `input`, `error`, `question` and `links` are JSON kept as text; times are `Date`s.
+
+| Method | What it does |
+| --- | --- |
+| `transaction(fn)` | `fn(tx)` in a transaction, with the store bound to it (a savepoint when called on `tx`); rolled back when `fn` throws |
+| `createConnection(fields)` / `getConnection(id)` / `updateConnection(id, changes)` | a `qube_connections` row; `update` answers the row as written, or `null` |
+| `ownedBy(ownerType, ownerId)` | an owner's connections, newest first |
+| `withConnectionLock(id, fn)` | `fn(tx, row)` in a transaction holding the row's lock (`SELECT ... FOR NO KEY UPDATE`), with the row as it is now or `null`; re-entrant in its own transaction |
+| `createRun(fields)` / `getRun(id)` / `updateRun(id, changes)` | a `qube_runs` row |
+| `latestRun(recordType, recordId, operation)` | a record's newest run of an operation, or `null` |
+| `withRunLock(id, fn)` | as `withConnectionLock`, for a run |
+| `once(runId, deliveryId, fn)` | runs `fn` unless the run has taken that delivery id (`qube_notifications`), in the same transaction, and answers whether it ran |
+| `findQuickbooksRecords(where, { limit, lock })` | `qube_quickbooks_records` rows by `connectionId` and any of `kind`, `list`, `qbId`, `recordType`, `recordId`, in id order |
+| `createQuickbooksRecord(fields)` / `updateQuickbooksRecord(id, changes)` / `deleteQuickbooksRecord(id)` | |
+
+A write that breaks one of `schema.sql`'s unique keys throws `StoreConflict`. An id from a URL
+that isn't a valid id (`"abc"`) finds nothing. Check your store with the suite, from a test file of
+its own:
+
+```js
+// test/qube-store.test.js
+const storeTests = require("qubesync/kit/store-tests");
+const { makeStore } = require("../quickbooks-desktop/store");
+
+storeTests(async () => makeStore(await freshTestDatabase()));
+```
+
 ### The config file: `quickbooks-desktop/config.js`
 
-The only place the kit reads your app from. A setting it needs and you haven't written throws the
-first time it's needed, naming this file, so nothing silently passes. Write `authorizeQuestion`
-before anything else.
+The only place the kit reads your app from. A setting it needs and you haven't written throws
+`NotConfigured` the first time it's needed, naming this file, so nothing silently passes.
 
 ```js
 const { configure } = require("qubesync/kit"); // or: import { configure } from "qubesync/kit";
 
-const Account = require("../models/account");
+const { Account, Customer, Invoice } = require("../models");
+const store = require("./store");
 const CreateInvoice = require("./create-invoice");
-const AccountConnection = require("./account-connection");
+const ConnectionEvents = require("./connection-events");
+
+const MODELS = { Account, Customer, Invoice };
 
 module.exports = configure({
-  // Each operation class by the slug in its webhook URL (its static slug). A fixed list, so a
-  // class is never looked up from the URL itself: any other slug is a 404.
+  store,
   operations: { create_invoice: CreateInvoice },
-  // The connection's own events (connected, setup cancelled, stalled, resumed).
-  connection: AccountConnection,
-  // The signed-in customer's account, from the request.
-  currentAccount: (req) => Account.findByPk(req.user.accountId),
-  // True when the signed-in user may answer or search this record's question. The record's id
-  // comes from the URL, so this is all that keeps one customer's users off another's records:
-  // until it's set, every answer and search is refused with a 403 (and logged).
-  authorizeQuestion: (req, record) => record.accountId === req.user.accountId,
-  // Optional: a durable queue (below), and a dedupe store shared by every process.
-  // enqueue: (job) => queue.add("webhook", job),
-  // dedupe: { seen: (key) => redis.exists(`qube:${key}`), remember: (key) => redis.set(`qube:${key}`, 1, "EX", 86400) },
+  connectionEvents: ConnectionEvents,
+  currentAccount: (req) => (req.user ? Account.findByPk(req.user.accountId) : null),
+  // Your record of a type the kit kept (a run's, a connection's owner, a linked QuickBooks id).
+  findRecord: (type, id) => (MODELS[type] ? MODELS[type].findByPk(id) : null),
+  // Optional: a durable queue (below).
+  // enqueue: (delivery) => queue.add("webhook", delivery, { attempts: 10 }),
 });
 ```
 
 | Setting | What it is | Default |
 | --- | --- | --- |
-| `operations` | slug → operation class | none: throws |
-| `connection` | your connection class | none: throws |
-| `currentAccount` | `(req) → account` | none: throws |
-| `authorizeQuestion` | `(req, record, operation) → true` when the user may answer or search; anything else is a 404 | refuses every answer and search with a 403, and logs why |
-| `enqueue` | `(job) →` hands `{ operation, recordId, body }` to your queue | in this process, after the response, one at a time, with a warning |
-| `dedupe` | `{ seen(key), remember(key) }` for notification delivery ids (may be async) | in this process's memory, with a warning |
+| `store` | your store | none: throws |
+| `operations` | slug → operation class (each class's static `slug` is its key) | none: throws |
+| `connectionEvents` | your `ConnectionEvents` class | none: throws |
+| `currentAccount` | `(req) → account`: the signed-in customer's account, which owns its connections. `null` answers 401. | none: throws |
+| `authorizeQuestion` | `(req, record, run) → true` when the signed-in user may answer or search that run's question, or send its start again. The run carries its `operation` and its `connection` (whose `ownerType` and `ownerId` say who connected it). Only `true` allows; anything else answers 404 (search: `[]` with 404), as for a missing run, and is logged. | allows only when `currentAccount` owns the run's connection (compared by type and id, so a null account, or one with no id, never matches); with neither this nor `currentAccount` set, every request is a 403, logged |
+| `recordType` | `(record) → type`: the type a row keeps for one of your records | its class's name (a plain object, as Prisma returns, needs this set) |
+| `findRecord` | `(type, id) → record`: your record of that type | none: an operation needs its own `findRecord`, and `findLinked` and `owner()` throw |
+| `enqueue` | `(delivery) →` hands `{ kind, id, body }` (kind `"run"` or `"connection"`) to your queue; `false` or a throw answers 503 | `job(delivery)` in this process, after the response, with a warning |
+| `jobAttempts` | how many times `job()` runs a delivery whose work threw, with a growing wait, before it logs an error and throws | `10` |
 | `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl` | | the environment above; `webhookSecret` may be a list while one rotates |
 
 The secrets never show: `console.log` and `JSON.stringify` of the settings say only whether each is
-set.
+set. Set `authorizeQuestion` only to change who may answer: to check more (that this user may see
+the record), or less (staff who act for any account):
+
+```js
+authorizeQuestion: async (req, record, run) =>
+  run.connection.ownerId === String(req.user.accountId) && req.user.canEdit(record),
+```
 
 ### Mounting the routers: `app.js`
 
@@ -381,61 +436,175 @@ const qube = require("qubesync/express"); // or: import { webhooks, connect, que
 const config = require("./quickbooks-desktop/config");
 
 const app = express();
-
-// POST /webhooks/qube/:operation/:record_id. Before express.json(), which would read the body
-// first and leave nothing to verify: no sign-in, no CSRF. Verifies, answers 404 for a slug that
-// isn't yours, enqueues and answers 200 (401 for a bad signature, logging only its reason).
-app.use(qube.webhooks(config)); // { limit: "5mb" }: the biggest body taken
-
+app.use(qube.webhooks(config)); // before express.json(): the raw body, no sign-in, no CSRF
 app.use(express.json());
 app.use(requireSignIn); // your sign-in, and your CSRF protection
-
-// POST /quickbooks/connect, from a "Connect QuickBooks Desktop" button: makes the account's
-// connection (or reuses it, with a fresh link) and redirects to QuBe Sync's setup. The setup
-// doesn't come back here: connection.connected comes to your connection class by webhook.
 app.use(qube.connect(config));
-
-// POST /qube/questions/:operation/:record_id (a choice) and GET .../search (a record field's
-// matches): each asks authorizeQuestion first (anything but true is a 404; unset, a 403), and the
-// API key never reaches the browser.
 app.use(qube.questions(config));
 ```
 
-Passing `config` (what `configure` returns) makes sure the config file is loaded before the routes
-are; a router also takes more settings in its argument. `questions()` parses its own form, after
-your middleware: if your CSRF protection reads its token from the body, mount
-`express.urlencoded({ extended: false })` before it.
+| Route | What it does |
+| --- | --- |
+| `POST quickbooks/connections` | Connect, for the signed-in account. Sends its newest connection that has never connected (`pending` or `setup_cancelled`) back through setup, so clicking Connect again doesn't pile up connections. Makes a new one (the row, then QuBe Sync's connection with the row's webhook URL, then its `qubeId`, with an optional `name`) when the account has none, or with `new=1`. Redirects (303) to the setup. |
+| `POST quickbooks/connections/:id/onboarding` | One of the signed-in account's connections, back through setup, with its webhook URL brought up to date (or made at QuBe Sync, for a row QuBe Sync never answered). Another account's connection answers 404. |
+| `POST webhooks/qube/runs/:id` | A run's webhooks. |
+| `POST webhooks/qube/connections/:id` | A connection's webhooks. |
+| `POST qube/questions/runs/:id` | Your user's answer to the run's question, from `renderQuestion`'s forms. |
+| `GET qube/questions/runs/:id/search` | A record field's matches, as JSON. |
+| `POST qube/runs/:id/retry_start` | A start QuBe Sync never confirmed, sent again with the same reference, from `renderRunStatus`. 409 for a run that isn't `starting`. |
 
-### An operation: `quickbooks-desktop/create-invoice.js`
+The webhook routes verify the signature (401 if it doesn't check out, logging only its reason),
+answer 404 when the row isn't there, enqueue, and answer 200, or 503 when the enqueue didn't take
+it. Any content type, up to 5 MB (413 beyond). Each id in a URL is only a pointer: the job checks
+the signed event's reference and connection id against the row. The question routes and the start
+retry ask `authorizeQuestion` before anything else; an answer QuBe Sync says has changed (409, or
+any 400) forgets the question and answers 409, and one it can't take (422) says why.
+
+Passing `config` (what `configure` returns) makes sure the config file is loaded before the routes
+are; a router also takes more settings in its argument. `connect()` and `questions()` parse their
+own forms, after your middleware: if your CSRF protection reads its token from the body, mount
+`express.urlencoded({ extended: false })` before it. Two buttons cover connecting:
+
+```html
+<form method="post" action="/quickbooks/connections"><button>Connect QuickBooks Desktop</button></form>
+<form method="post" action="/quickbooks/connections">
+  <input type="hidden" name="new" value="1"><input type="hidden" name="name" value="Second file">
+  <button>Connect another company file</button>
+</form>
+```
+
+### Connections
+
+A `Connection` is one company file: `ownerType` and `ownerId` (your account), `qubeId` (QuBe
+Sync's id, `null` until it answers), `name`, `status` (`pending`, `connected`, `setup_cancelled`,
+`stalled`), `stallReason` and `revision`. `Connection.ownedBy(account)` lists an account's, and
+`Connection.get(id)` finds one. `connection.notCheckingIn()` is a stall because the Web Connector
+isn't calling in; `connection.webhookUrl()` is `QUBE_WEBHOOK_URL/connections/<id>`.
+
+Its own events update `status`, `stallReason` and `revision` when the event is for that connection
+(`qubeId`) and newer than the last one applied, under the row's lock. Then your class runs, with
+`this.connection` and `await this.owner()`.
+
+An event can come before the row has its `qubeId`: a simulated connection sends
+`connection.connected` as it's made, before `createConnection` has answered. Such an event finds
+QuBe Sync's connection made with the row's webhook URL and keeps its id, or throws `NotReady`, so
+the job tries again shortly. Connect does the same for a row left without an id (a crash between
+the create and the save), so one row never gets two connections. Adopting lists the app's
+connections and takes only the one with the row's webhook URL that has never connected, was made at
+or after the row (its `created_at`, with five minutes allowed for clock difference), and has the
+row's name when the row has one; if two qualify it takes neither, and one with no `created_at` is
+never adopted.
 
 ```js
-const { Operation, withoutNils, asString } = require("qubesync/kit");
-const Invoice = require("../models/invoice");
+// quickbooks-desktop/connection-events.js
+const { ConnectionEvents } = require("qubesync/kit");
+
+class QuickbooksConnectionEvents extends ConnectionEvents {
+  // QuickBooks is connected: start syncing.
+  async connected(event) {
+    await InitialImport.start(await this.owner(), this.connection);
+  }
+
+  // They chose "Cancel setup": offer to set it up again.
+  async setupCancelled(event) {
+    this.logEvent(event);
+  }
+
+  // this.connection.stallReason: "not_checking_in" (turn on the QuickBooks computer and check the
+  // Web Connector runs) or "quickbooks_unavailable" (open QuickBooks with the company file).
+  async stalled(event) {
+    await mailer.quickbooksStalled(await this.owner(), this.connection);
+  }
+
+  async resumed(event) {
+    this.logEvent(event);
+  }
+}
+
+module.exports = QuickbooksConnectionEvents;
+```
+
+#### QuickBooks ids
+
+Every ListID and TxnID your app learns is kept against its connection and its list family.
+QuickBooks gives out ListIDs from one counter per family, so an id is unique only within its family
+of one company file: customers, vendors, employees and other names share one, every item type
+shares another, each other list (accounts, classes, terms...) has its own (`familyFor(kind)`).
+TxnIDs are kept per transaction type.
+
+```js
+await connection.link(customer, { kind: "customer", qbId: listId, editSequence: "171", name: "Riverbend Electric" });
+await connection.qbIdFor(customer, { kind: "customer" });     // "80000001-1738310400", or null
+await connection.findLinked(listId, { kind: "customer" });    // your Customer (findRecord), or null
+await connection.findLinked(entityRefListId);                 // any family; throws if the id is in several
+await connection.quickbooksRecord(listId, { kind: "item" });  // the row, with kind, editSequence and name
+```
+
+A record has one id per kind on a connection; linking it again replaces it. One contact can be
+linked as a customer and as a vendor. An id already linked in that family to another of your
+records moves to this one, and that's logged; linked again with another kind of the same family
+(an item converted from service to non-inventory), the row's kind changes. `qbIdFor` finds an item
+linked as `item_service` when asked for `item` or `item_non_inventory`, but never hands out a
+customer's id as a vendor's.
+
+### Writing an operation: `quickbooks-desktop/create-invoice.js`
+
+```js
+const { Operation, get } = require("qubesync/kit");
+const { Invoice } = require("../models");
 
 class CreateInvoice extends Operation {
   static workflow = "add_transaction";
   static slug = "create_invoice";
 
-  // Your invoice, by the id in its webhook URL.
+  // Optional: your record, by the id its run keeps. Leave it out and the findRecord setting finds
+  // it by its type; write it to load what the input reads.
   static async findRecord(id) {
-    return Invoice.findByPk(id, { include: ["lines"] });
+    return Invoice.findByPk(id, { include: ["customer", { association: "lines", include: ["item"] }] });
   }
 
-  // The run's input, from the invoice.
-  input() {
-    return withoutNils({ operation: "invoice.create", params: { ref_number: asString(this.record.id) } });
+  // The run's input, from the record. withoutNils leaves out a field your record doesn't have yet.
+  async input() {
+    const lines = await Promise.all(
+      this.record.lines.map(async (line) => ({
+        item_ref: await this.quickbooksRef(line.item, { kind: "item", name: get(line, "item", "name") }),
+        amount: line.total,
+      }))
+    );
+    return this.withoutNils({
+      operation: "invoice.create",
+      params: {
+        // Its ListID on this connection when it's linked, otherwise its name.
+        customer_ref: await this.quickbooksRef(this.record.customer, { kind: "customer", name: get(this.record, "customer", "name") }),
+        ref_number: this.record.number,
+        invoice_line_add: lines,
+      },
+    });
   }
 
   // How the run ended: event.outcome says which, event.output holds the result.
   async ended(event) {
-    if (event.outcome === "added") {
-      this.record.txnId = event.output.record.txn_id;
-      await this.saveRecord();
-    }
+    // The records the add named, found or made, by the input's path: linked, so the next run
+    // refers to them by id.
+    await this.linkReferences(event, (path) => {
+      if (path === "customer_ref") return this.record.customer;
+      const line = /^invoice_line_add\.(\d+)\.item_ref$/.exec(path);
+      return line ? get(this.record.lines[Number(line[1])], "item") : null;
+    });
+    if (event.outcome !== "added") return;
+
+    const txn = (event.output && event.output.record) || {};
+    await this.connection.link(this.record, { kind: "invoice", qbId: txn.txn_id, editSequence: txn.edit_sequence, name: txn.ref_number });
+    await this.record.update({ status: "sent" });
   }
 
   // A run that failed, or that your app cancelled.
   async failed(event) {
+    await this.record.update({ status: "failed" });
+  }
+
+  // What a running workflow sends along (a sync's pages): taken once per delivery_id.
+  async notification(event) {
     this.logEvent(event);
   }
 }
@@ -443,85 +612,103 @@ class CreateInvoice extends Operation {
 module.exports = CreateInvoice;
 ```
 
-Start a run with `await CreateInvoice.start(invoice, account.qube_connection_id)`. The record keeps
-the run's reference and revision in `qube_reference` and `qube_revision`, and a question in
-`qube_question` and `qube_links` (JSON), written with the record's `save()` (Sequelize, Mongoose,
-TypeORM). Override `saveRecord` for another ORM (Prisma's `update`, say), or `savedReference` /
-`saveReference`, `savedRevision` / `saveRevision`, `savedQuestion` / `savedLinks` / `saveQuestion`
-to keep them elsewhere. The handlers: `question` (saves it; your user's choice answers it),
-`notification`, `ended`, `failed`; each logs until you write it. `handle` skips an event whose
-reference isn't the record's, takes a notification once by its delivery id (`dedupe`), and applies
-any other only when its revision is newer. With more than one worker, take a row lock on the record
-around it.
-
-In TypeScript, `class CreateInvoice extends Operation<Invoice>` types `this.record`.
-
-### The connection class: `quickbooks-desktop/account-connection.js`
-
 ```js
-const { ConnectionEvents } = require("qubesync/kit");
-const Account = require("../models/account");
-
-class AccountConnection extends ConnectionEvents {
-  static async findRecord(id) {
-    return Account.findByPk(id); // the id in the connection's webhook URL
-  }
-
-  async connected(event) { /* mark the account connected, and start syncing */ }
-  async setupCancelled(event) { /* offer Connect QuickBooks Desktop again */ }
-  async stalled(event) { /* show event.stallReason: not_checking_in or quickbooks_unavailable */ }
-  async resumed(event) { /* clear what stalled showed */ }
-}
-
-module.exports = AccountConnection;
+const run = await CreateInvoice.start(invoice, connection);
 ```
 
-The account keeps its connection's id and last revision in `qube_connection_id` and
-`qube_connection_revision`; override `savedConnectionId` / `saveConnectionId`, `savedRevision` /
-`saveRevision` or `saveRecord` to keep them elsewhere.
+`start` takes a connection QuBe Sync has made (it throws `NotConnected` for one with no `qubeId`).
+It writes the run's row first, with a new reference and state `starting`, since a webhook can come
+before it returns; starts the run with that reference as the idempotency key and
+`QUBE_WEBHOOK_URL/runs/<run id>` as its webhook URL; keeps QuBe Sync's `qubeRunId`, `state`,
+`runUrl` and `cancelUrl`; and resolves to the `Run`. The row keeps the input it sent.
 
-### Showing a question: `renderQuestion`
+- **Refused** (QuBe Sync answered 4xx) or an input that threw: nothing was started. The row is
+  marked `failed` and the error thrown; start again.
+- **No answer** (a timeout, a 5xx, a dropped connection): the run may have started. The row stays
+  `starting`, with its reference and input, and the error is thrown. Send it again with
+  `await run.retryStart()` (or `CreateInvoice.retryStart(run)`), never with a new `start`: a new
+  reference would start a second run, and a second invoice.
+
+`retryStart` resends the same reference as the `Idempotency-Key`, with the same workflow, input
+and webhook URL: QuBe Sync answers a repeat of a start it took with the run that start made, and
+starts nothing. It returns a run that already has its `qubeRunId` as it is, and refuses one that
+`failed`.
+
+Each event is applied under the run row's lock (`withRunLock`): one whose reference isn't the
+run's, or whose `connection_id` isn't its connection's, is skipped and logged; a notification is
+taken once (`once`, in the same transaction); anything else only when its revision is newer than
+the last applied. Handlers see `this.record`, `this.run` and `this.connection`, and `this.store`,
+the lock's transaction: what a handler writes through it (a `link`, say) is saved with the revision
+or not at all. A handler you don't write logs.
+
+### Run status and questions
+
+The kit keeps every ending on the run row before your handler runs: `state`, `outcome`, a
+failure's `error` (a sentence, or its code, message and detail), a cancel's `cancelReason`, and
+`endedAt`. `run.ended()`, `run.failed()` and `run.cancelled()` say which, and `run.summaryText()`
+says it in a sentence: "Added to QuickBooks", "Done", "Failed: <message>", "Cancelled: <reason>",
+"Waiting for your answer", "Starting", "Not confirmed by QuBe Sync yet" or "Running".
+`run.errorMessage()` and `run.errorDetail()` give the error's parts.
+
+Show the latest run on the record's page:
 
 ```js
-const { renderQuestion } = require("qubesync/kit");
+const { Run, renderQuestion, renderRunStatus } = require("qubesync/kit");
 
-const html = renderQuestion(invoice.qube_question, {
-  action: `/qube/questions/create_invoice/${encodeURIComponent(invoice.id)}`, // where questions() is mounted
-  csrfToken: req.csrfToken && req.csrfToken(), // your CSRF protection's, as _csrf (csrfField: to rename it)
-  nonce: res.locals.cspNonce, // your Content-Security-Policy's, on the search box's script
-});
+const run = await Run.latestFor(invoice, "create_invoice");
+const html =
+  renderRunStatus(run, { csrfToken: req.csrfToken() }) +
+  renderQuestion(run, { csrfToken: req.csrfToken(), nonce: res.locals.cspNonce });
 ```
 
-`renderQuestion(question, { action, csrfToken, csrfField = "_csrf", nonce })` returns the
-question as HTML, a form per choice, with every value escaped and `qube-` classes for your CSS, or
-`""` when nothing is asked. For other markup, write your own with `escapeHtml` and `SEARCH_SCRIPT`:
-the routes need only the form's `choice` and `data[<field>]`, and a search box's
-`data-qube-search` and `data-qube-field`.
+`renderRunStatus(run, { mount, csrfToken, csrfField = "_csrf" })` shows the summary
+(`.qube-run-summary`, inside `.qube-run-status.qube-run-<state>`) and, for a failure, the error's
+detail (`.qube-run-error-detail`); a start unconfirmed for a minute (`run.unconfirmed()`) gets a
+"Try the start again" button posting to `qube/runs/:id/retry_start`. `renderQuestion(run, { mount,
+csrfToken, csrfField, nonce })` shows the run's open question, a form per choice posting to
+`qube/questions/runs/:id`, and a record field's box searching through your app, so the API key
+never reaches the browser. Both return `""` when there's nothing to show, escape every value, and
+use `qube-` classes for your CSS; `mount` is where `questions()` is mounted. For other markup,
+write your own with `escapeHtml` and `SEARCH_SCRIPT`.
 
-### A durable queue
+### Background work
 
-The default `enqueue` runs each job in your web process after the response: a restart loses the
-jobs it hasn't run, so point it at a queue before production. QuBe Sync had its 2xx when a job was
-enqueued, so a job that throws is your queue's to retry. With BullMQ:
+QuBe Sync's webhooks are handled in the background. The endpoint verifies a delivery, answers 200
+at once, and hands it to `enqueue`. The default runs `job(delivery)` in your web process after the
+response: a restart loses the deliveries it hasn't run, so point `enqueue` at a queue before
+production, and have its worker call `run(delivery)`:
 
 ```js
 const { Queue, Worker } = require("bullmq");
 const { run } = require("qubesync/kit");
 
 const queue = new Queue("qube-webhooks", { connection });
-// in config: enqueue: (job) => queue.add("webhook", job, { attempts: 10 }),
-new Worker("qube-webhooks", (job) => run(job.data), { connection }); // require the config file here too
+// in config: enqueue: (delivery) => queue.add("webhook", delivery, { attempts: 10, backoff: { type: "exponential", delay: 3000 } }),
+new Worker("qube-webhooks", (task) => run(task.data), { connection }); // require the config file here too
 ```
 
-pg-boss is the same with `boss.send` and `boss.work`. Without Express, `qubesync/kit` has the
-routes' work as plain functions: `receiveWebhook`, `run`, `startOnboarding`, `answerQuestion` and
-`searchQuestion`.
+Retries are your queue's: QuBe Sync stops sending a delivery once your endpoint has answered 200.
+`run` throws when it can't do the work (a handler threw, the store is down, the run's operation was
+taken out of `operations`, or a connection's event came before its `qubeId`: `NotReady`). `job`,
+the default's, tries `jobAttempts` times with a growing wait (3 s, 18 s, 83 s...), then logs an
+error ("QuBe Sync: gave up on a webhook ...") and throws. A delivery whose run, connection or record
+has been deleted since isn't retried: `run` logs a warning ("QuBe Sync: dropped ...") and returns.
+
+Without Express, `qubesync/kit` has the routes' work as plain functions: `receiveWebhook`,
+`connectQuickbooks`, `resendOnboarding`, `answerQuestion`, `searchQuestion` and `retryStart`, each
+resolving to the status (and body or location) to answer with.
+
+### Storage
+
+Rows go with their run: deleting a run deletes its notifications (`ON DELETE CASCADE`). Runs
+themselves are yours to prune once you no longer need them, for instance runs in `completed`,
+`failed` or `cancelled` whose `ended_at` is more than 90 days ago.
 
 ## Development
 
 ```sh
 npm ci              # the dev dependencies: Express 4, TypeScript and Express's types
-npm test            # node:test: the client, webhooks, the kit and the Express adapter
+npm test            # node:test: the client, webhooks, the kit, the store checks on memoryStore() and the Express adapter
 npm run test:types  # tsc --strict against test/types.ts and test/kit-types.ts
 node scripts/generate-operations.js          # regenerate operations/ from test/fixtures/operations.json
 node scripts/generate-operations.js --check  # fail when operations/ is stale
