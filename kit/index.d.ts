@@ -269,7 +269,7 @@ export interface SettingsOptions<Request = any> {
   /**
    * True when the signed-in user may answer or search `run`'s question (or retry its start). Only
    * `true` allows: anything else is a 404. Default: currentAccount owns the run's connection,
-   * compared by type and id, so a null account never matches.
+   * compared by type and id, so a null account never matches; it throws NotConfigured while currentAccount is unset.
    */
   authorizeQuestion?: ((request: Request, record: any, run: Run) => Awaitable<unknown>) | null;
   /** The type a record's rows keep. Default: its class's name. */
@@ -569,13 +569,13 @@ export interface SearchMatch {
 }
 
 /**
- * { status: 303 } once answered; else { status, message } (plain text): 403 with no policy to ask
+ * { status: 303 } once answered; else { status, message } (plain text):
  * (logged), 404 not found or not allowed, 409 the question changed, 422 a field refused.
  */
 export declare function answerQuestion(input: { runId: RowId; form: Record<string, unknown>; request: any }): Promise<{ status: number; message?: string }>;
-/** { status, json }: 200 with the matches ([] outside the bounds), 403 [], 404 [], 409 [] no longer searching, QuBe Sync's 4xx with []. */
+/** { status, json }: 200 with the matches ([] outside the bounds), 404 [], 409 [] no longer searching, QuBe Sync's 4xx with []. */
 export declare function searchQuestion(input: { runId: RowId; field: unknown; q: unknown; request: any }): Promise<{ status: number; json: SearchMatch[] }>;
-/** { status: 303 } once sent (or refused, or unanswered again); else { status, message }: 403, 404, 409 not starting. */
+/** { status: 303 } once sent (or refused, or unanswered again); else { status, message }: 404, 409 not starting. With authorizeQuestion and currentAccount unset, throws NotConfigured. */
 export declare function retryStart(input: { runId: RowId; request: any }): Promise<{ status: number; message?: string }>;
 /** The choice's fields from the form, each as its type. */
 export declare function answerData(choice: QubeChoice, form: Record<string, unknown>): Record<string, unknown>;

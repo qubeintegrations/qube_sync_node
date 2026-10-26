@@ -310,6 +310,9 @@ describe("express: connect", () => {
     const unset = await request(app(), form("/quickbooks/connections", {}, tables.Account.add()));
     assert.strictEqual(unset.status, 500);
     assert.match(unset.text, /currentAccount isn't set yet.*quickbooks-desktop\/config/);
+    const onboarding = await request(app(), form("/quickbooks/connections/1/onboarding", {}, tables.Account.add()));
+    assert.strictEqual(onboarding.status, 500);
+    assert.match(onboarding.text, /currentAccount isn't set yet/);
     assert.strictEqual(fake.received.length, 0);
   });
 
@@ -492,16 +495,24 @@ describe("express: questions", () => {
     assert.strictEqual(fake.received.length, 0);
   });
 
-  it("answers 403, logged, while neither authorizeQuestion nor currentAccount is set", async () => {
+  it("raises naming the config file when authorizeQuestion is left to its default and currentAccount isn't set", async () => {
     reset();
     const { account, run } = await asking();
     kit.configure({ currentAccount: null });
+    const expected = /currentAccount isn't set yet.*quickbooks-desktop\/config/;
     const res = await request(app(), answerForm(run, { choice: "use:1" }, account));
-    assert.strictEqual(res.status, 403);
-    assert.match(loggedText(), /neither authorizeQuestion nor currentAccount is set/);
+    assert.strictEqual(res.status, 500);
+    assert.match(res.text, expected);
     const search = await request(app(), { path: `/qube/questions/runs/${run.id}/search?field=customer&q=Riv`, headers: { "X-Test-Account": String(account.id) } });
-    assert.deepStrictEqual([search.status, JSON.parse(search.text)], [403, []]);
+    assert.strictEqual(search.status, 500);
+    assert.match(search.text, expected);
+    await run.update({ state: "starting" });
+    const retried = await request(app(), form(`/qube/runs/${run.id}/retry_start`, {}, account));
+    assert.strictEqual(retried.status, 500);
+    assert.match(retried.text, expected);
+    assert.strictEqual(fake.received.length, 0);
     kit.configure({ authorizeQuestion: () => true });
+    await run.update({ state: "awaiting_input" });
     answer(data({}));
     assert.strictEqual((await request(app(), answerForm(run, { choice: "use:1" }, account))).status, 303);
   });

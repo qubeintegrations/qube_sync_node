@@ -26,8 +26,7 @@ export declare function webhooks(options?: SettingsOptions | Settings): Router;
 export declare function connect(options?: SettingsOptions | Settings): Router;
 
 /**
- * POST /qube/questions/runs/:id, GET .../search and POST /qube/runs/:id/retry_start: 403 with no
- * policy to ask, 404 when authorizeQuestion refuses, 409 when the question (or the start) has
+ * POST /qube/questions/runs/:id, GET .../search and POST /qube/runs/:id/retry_start: 404 when authorizeQuestion refuses, 409 when the question (or the start) has
  * changed. Mount it behind your sign-in and CSRF protection.
  */
 export declare function questions(options?: RouterOptions<QuestionsOptions> | Settings): Router;

@@ -13,11 +13,10 @@
 const { APIError } = require("../client");
 const { client, isNoAnswer } = require("./client");
 const { Run } = require("./records");
-const { CONFIG_FILE, settings } = require("./settings");
+const { settings } = require("./settings");
 
 const QUESTION_CHANGED = "This question has changed; reload.";
 const NOT_STARTING = "This run isn't waiting for its start to be confirmed.";
-const FORBIDDEN = "QuBe Sync: neither authorizeQuestion nor currentAccount is set, so every answer is refused.";
 const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100 });
 
 // The run a request names, with its operation and its record, once authorizeQuestion says true,
@@ -26,20 +25,14 @@ const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100 
 // (404), so a user can't tell another customer's run is there. The run's id comes from the URL,
 // so this is what keeps one customer's users off another's runs.
 //
-// The default policy needs currentAccount: with neither it nor authorizeQuestion set, nobody can
-// be allowed, so the answer is 403, logged, a setup mistake to see.
+// The default policy reads currentAccount: unset, it throws NotConfigured, naming the config
+// file, as any setting does at its first use.
 async function authorizedRun(runId, request, action) {
   const run = await Run.get(String(runId));
   const OperationClass = run ? settings().operationClass(run.operation) : null;
   const record = OperationClass ? await OperationClass.recordFor(run) : null;
   if (record === null) return { status: 404 };
 
-  if (!hasPolicy()) {
-    console.warn(
-      `QuBe Sync: refused ${action} for run ${run.id}: neither authorizeQuestion nor currentAccount is set. Set currentAccount (or authorizeQuestion) with configure(...) in ${CONFIG_FILE}.`
-    );
-    return { status: 403 };
-  }
   const allowed = await settings().authorizeQuestion(request, record, run);
   if (allowed !== true) {
     console.warn(`QuBe Sync: refused ${action} for run ${run.id}: authorizeQuestion said no`);
@@ -49,16 +42,10 @@ async function authorizedRun(runId, request, action) {
   return { found: { run, operation: new OperationClass(record, run), record } };
 }
 
-// authorizeQuestion is set, or its default has currentAccount to go on.
-function hasPolicy() {
-  const current = settings();
-  return current.isSet("authorizeQuestion") || current.isSet("currentAccount");
-}
-
 /**
  * Posts your user's choice, with what they filled in for its fields, to the question's
  * links.decisions. Resolves to { status: 303 } once it's in (send them back to the page), or
- * { status, message } (plain text) when it isn't: 403 with no policy to ask (logged), 404 for a
+ * { status, message } (plain text) when it isn't: 404 for a
  * run that isn't there or authorizeQuestion doesn't allow, 409 when the question has changed, 422
  * when QuBe Sync couldn't take a field. The question is forgotten once it's answered, or once
  * QuBe Sync says it was answered or asked again since (a 409, or a 400 such as
@@ -68,7 +55,7 @@ function hasPolicy() {
  */
 async function answerQuestion({ runId, form, request }) {
   const { status, found } = await authorizedRun(runId, request, "an answer");
-  if (!found) return { status, message: status === 403 ? FORBIDDEN : "Not found" };
+  if (!found) return { status, message: "Not found" };
   const question = found.run.openQuestion();
   const links = found.run.links || {};
   const sent = form || {};
@@ -94,7 +81,7 @@ async function answerQuestion({ runId, form, request }) {
  * The matches for a record field, for what your user typed: [{ value, label, detail }], at most
  * 20, from the question's links.search, which a run sets while it asks with one. Resolves to
  * { status, json }: [] for a query under 2 or over 100 characters or a field name over 100
- * (nothing is asked), 403 [] with no policy to ask (logged), 404 [] for a run that isn't there or
+ * (nothing is asked), 404 [] for a run that isn't there or
  * authorizeQuestion doesn't allow, 409 [] when the question no longer searches, and QuBe Sync's
  * own 4xx with [].
  */
@@ -127,12 +114,12 @@ function isSearchable(query, name) {
  * as its Idempotency-Key (Run#retryStart), so a start that did land answers with its run rather
  * than making another. authorizeQuestion decides who may, as for answering the run's questions.
  * Resolves to { status: 303 } (send them back to the page, whose status says how it went), or
- * { status, message }: 403 with no policy to ask, 404 for a run that isn't there or isn't
+ * { status, message }: 404 for a run that isn't there or isn't
  * allowed, 409 for one that isn't starting.
  */
 async function retryStart({ runId, request }) {
   const { status, found } = await authorizedRun(runId, request, "a start retry");
-  if (!found) return { status, message: status === 403 ? FORBIDDEN : "Not found" };
+  if (!found) return { status, message: "Not found" };
   if (found.run.state !== "starting") return { status: 409, message: NOT_STARTING };
 
   try {

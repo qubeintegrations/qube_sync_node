@@ -35,7 +35,7 @@ QuickBooks ids live in the kit's own tables, and the app's tables need no QuBe c
   `qubeId` adopts QuBe Sync's connection made for it or throws `NotReady` for a retry.
 - **Settings**: `store`, `operations`, `connectionEvents`, `currentAccount`, `authorizeQuestion`
   (default: the signed-in account owns the run's connection, by type and id; with neither it nor
-  `currentAccount` set, a logged 403), `recordType`, `findRecord`, `enqueue` (default: `job()` in
+  `currentAccount` set, `NotConfigured` naming the config file), `recordType`, `findRecord`, `enqueue` (default: `job()` in
   this process), `jobAttempts` (10), `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl`. An unset
   one throws `NotConfigured` naming the config file; the secrets never show.
 - **The routes' work**, framework-free: `receiveWebhook` (200, 400, 401, 404, 413, 503), `run`,

@@ -154,8 +154,8 @@ function send(res, { status, location }) {
  *   POST /qube/runs/:id/retry_start       a start QuBe Sync never confirmed, sent again
  * Mount it behind your sign-in and your CSRF protection. Each asks the authorizeQuestion setting
  * before anything else (by default, the signed-in account owns the run's connection): anything but
- * true is a 404, and with neither authorizeQuestion nor currentAccount set every request is a 403
- * (logged), a setup mistake to see. A question that has changed is a 409. options.limit: the
+ * true is a 404, and with neither authorizeQuestion nor currentAccount set it throws NotConfigured,
+ * naming the config file (a 500 through your error handler). A question that has changed is a 409. options.limit: the
  * biggest form taken (default Express's 100 kb).
  */
 function questions(options) {
