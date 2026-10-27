@@ -276,7 +276,7 @@ export interface EmployeeQueryParams {
   full_name?: string[];
   include_ret_element?: Array<"AccountNumber" | "AdditionalContactRef" | "AdditionalNotesRet" | "AdjustedServiceDate" | "AltPhone" | "BillingRateRef" | "BirthDate" | "DataExtRet" | "Department" | "Description" | "DisabilityDesc" | "Disabled" | "EditSequence" | "Email" | "EmergencyContacts" | "EmployeeAddress" | "EmployeePayrollInfo" | "EmployeeType" | "Ethnicity" | "Exempt" | "ExternalGUID" | "Fax" | "FirstName" | "Gender" | "HiredDate" | "IsActive" | "JobTitle" | "KeyEmployee" | "LastName" | "ListID" | "MiddleName" | "MilitaryStatus" | "Mobile" | "Name" | "Notes" | "OnFile" | "OriginalHireDate" | "Pager" | "PagerPIN" | "PartOrFullTime" | "Phone" | "PrintAs" | "ReleasedDate" | "SSN" | "Salutation" | "Suffix" | "SupervisorRef" | "TargetBonus" | "TimeCreated" | "TimeModified" | "USCitizen" | "USVeteran" | "WorkAuthExpireDate">;
   /**
-   * `list_id` and `full_name` both identify a list object. QuickBooks assigns `list_id` when the object is created. `list_id` values are unique within a list type, not globally across all lists. If both `full_name` and `list_id` are supplied in a request, QuickBooks uses `list_id` and ignores `full_name`.
+   * `list_id` and `full_name` both identify a list object. QuickBooks assigns `list_id` when the object is created. `list_id` values are unique within a list family, not across the company file: customers, vendors, employees and other names share one sequence, every item type shares another, and each other list has its own.
    *
    * Choose at most one of: `list_id`, or `full_name`, or the set (`active_status`, `from_modified_date`, `max_returned`, `name_filter`, `name_range_filter`, `to_modified_date`). Members of a set combine with each other, not with the other choices.
    */
@@ -435,7 +435,7 @@ export interface EmployeeUpdateParams {
    */
   last_name?: string;
   /**
-   * `list_id` and `full_name` both identify a list object. QuickBooks assigns `list_id` when the object is created. `list_id` values are unique within a list type, not globally across all lists. If both `full_name` and `list_id` are supplied in a request, QuickBooks uses `list_id` and ignores `full_name`.
+   * `list_id` and `full_name` both identify a list object. QuickBooks assigns `list_id` when the object is created. `list_id` values are unique within a list family, not across the company file: customers, vendors, employees and other names share one sequence, every item type shares another, and each other list has its own.
    */
   list_id: string;
   /**
