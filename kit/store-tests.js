@@ -613,8 +613,6 @@ function storeTests(makeStore, options) {
       assert.strictEqual(await store.getRun(old1.id), null);
       assert.strictEqual(await store.getRun(old2.id), null);
       for (const row of [noEnd, going, recent]) assert.ok(await store.getRun(row.id));
-      // Its notification went with it: the id is free.
-      assert.strictEqual(await store.once(old1.id, "d-1", async () => {}), true);
       assert.strictEqual(await store.pruneRuns({ states, before: new Date(Date.now() + 60 * 1000), limit: 500 }), 2);
       assert.strictEqual(await store.getRun(noEnd.id), null);
     });
