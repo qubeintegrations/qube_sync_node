@@ -521,6 +521,10 @@ module.exports = configure({
 | `jobAttempts` | how many times `job()` runs a delivery whose work threw, with a growing wait, before it logs an error and throws | `10` |
 | `pruneRunsAfter` | milliseconds ended runs and requests are kept before `pruneRuns()` deletes them: a day (`DAY_MS`) or more ([Storage](#storage)) | `null`: never |
 | `connectionType` | the type onboarding creates connections as: `"realtime"` or `"standard"` (anything else throws). Workflows run only on realtime connections, billed as realtime. | `"realtime"` |
+| `uiClasses` | your CSS framework's classes by piece, beside the `qube-` ones ([Styling](#styling)) | none |
+| `pieces` | your own pieces by name, in place of the kit's ([Styling](#styling)) | the kit's |
+| `messages` | your words for the screens and the routes' messages, by key ([Wording and translations](#wording-and-translations)) | English |
+| `storyboard` | whether `storyboard()` shows its screens ([The storyboard](#the-storyboard)) | `true` when `NODE_ENV` is `"development"` |
 | `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl` | | the environment above; `webhookSecret` may be a list while one rotates |
 
 The secrets never show: `console.log` and `JSON.stringify` of the settings say only whether each is
@@ -534,8 +538,8 @@ authorizeQuestion: async (req, record, run) =>
 
 ### Mounting the routers: `app.js`
 
-Three routers, each optional, since they mount in different places. Their paths are relative to
-where they're mounted.
+Three routers, each optional, since they mount in different places, and a fourth for development
+([the storyboard](#the-storyboard)). Their paths are relative to where they're mounted.
 
 ```js
 const express = require("express");
@@ -548,6 +552,7 @@ app.use(express.json());
 app.use(requireSignIn); // your sign-in, and your CSRF protection
 app.use(qube.connect(config));
 app.use(qube.questions(config));
+app.use(qube.storyboard()); // GET /qube/storyboard, in development only
 ```
 
 | Route | What it does |
@@ -562,7 +567,9 @@ app.use(qube.questions(config));
 | `POST qube/questions/runs/:id` | Your user's answer to the run's question, from `renderQuestion`'s forms. |
 | `GET qube/questions/runs/:id/search` | A record field's matches, as JSON. |
 | `POST qube/runs/:id/retry_start` | A start QuBe Sync never confirmed, sent again with the same reference, from `renderRunStatus`. |
-| `POST qube/runs/:id/redeliver` | A run that looks stuck: asks QuBe Sync to send its latest event again (`redeliverRun`), from `renderRunStatus`'s "Send its latest news again". |
+| `POST qube/runs/:id/redeliver` | A run that looks stuck: asks QuBe Sync to send its latest event again (`redeliverRun`), from `renderRunStatus`'s "Check for updates". |
+| `GET qube/assets/question.js`, `GET qube/assets/qubesync.css` | The behaviour script and the opt-in stylesheet, from `questions()` ([Styling](#styling)). |
+| `GET qube/storyboard`, `GET qube/storyboard/:screen` | Every screen with sample data, from `storyboard()`, while the `storyboard` setting is true ([The storyboard](#the-storyboard)). |
 
 The webhook routes verify the signature, answer 404 when the row isn't there, enqueue, and answer
 200, or 503 when the enqueue didn't take it. Any content type, up to 5 MB (413 beyond). Each id in
@@ -582,7 +589,9 @@ to show once ([below](#run-status-and-questions)): a question that changed (QuBe
 400, which also forgets it: `QUESTION_CHANGED`), an answer QuBe Sync can't take (422: its
 `errors.detail`), a retry of a run that isn't starting (`NOT_STARTING`), and a redelivery that
 isn't due (`NOT_QUIET`), refused (`REDELIVERY_REFUSED[409]`, `[429]`) or unanswered (`NO_ANSWER`).
-A plain 409 or 422 page would show nothing useful to someone who clicked a button.
+A plain 409 or 422 page would show nothing useful to someone who clicked a button. Those constants
+are message keys (`"errors.question_changed"`); the results carry their words, `t(key)`, which the
+`messages` setting can change.
 
 Passing `config` (what `configure` returns) makes sure the config file is loaded before the routes
 are; a router also takes more settings in its argument. `connect()` and `questions()` parse their
@@ -897,72 +906,376 @@ retry runs it again.
 The kit keeps every ending on the run row before your handler runs: `state`, `outcome`, a
 failure's `error` (a sentence, or its code, message and detail), a cancel's `cancelReason`, and
 `endedAt`. `run.ended()`, `run.failed()` and `run.cancelled()` say which, and `run.summaryText()`
-says it in a sentence: "Added to QuickBooks", "Done", "Failed: <message>", "Cancelled: <reason>",
-"Waiting for your answer", "Starting", "Not confirmed by QuBe Sync yet" or "Running".
-`run.errorMessage()` and `run.errorDetail()` give the error's parts.
+says it in a few words for your user: "Added to QuickBooks", "Done", "Couldn't sync", "Cancelled",
+"Needs your answer", "Sending to QuickBooks", "Still waiting for QuickBooks" (a start unconfirmed
+for a minute) or "Syncing with QuickBooks". `run.reasonText()` says why it failed or was cancelled,
+as a sentence (the error's message, or the reason your app gave), and `null` otherwise.
+`run.errorMessage()` and `run.errorDetail()` give the error's parts. The words are the `messages`
+setting's ([Wording and translations](#wording-and-translations)).
 
-Show the record's [sync status](#sync-status) and its run's question on the record's page:
+Show the record's [sync status](#sync-status) and its run's question on the record's page, with the
+behaviour script (and, if you like, the stylesheet) in your layout's `<head>`:
 
 ```js
-const { renderQuestion, renderRunStatus } = require("qubesync/kit");
+const { renderAssets, renderQuestion, renderRunStatus } = require("qubesync/kit");
 const { takeError } = require("qubesync/express");
+
+// in your layout's <head>
+renderAssets({ stylesheet: true, nonce: res.locals.cspNonce });
 
 app.get("/invoices/:id", async (req, res) => {
   const invoice = await Invoice.findByPk(req.params.id);
   const connection = await currentConnection(req); // the company file the page is about
   const status = await connection.syncStatus(invoice, "create_invoice");
   const html =
-    renderRunStatus(status, { csrfToken: req.csrfToken(), error: takeError(req, res) }) +
-    renderQuestion(status, { csrfToken: req.csrfToken(), nonce: res.locals.cspNonce });
+    renderRunStatus(status, { csrfToken: req.csrfToken(), error: takeError(req, res), connection }) +
+    renderQuestion(status, { csrfToken: req.csrfToken() });
   // ...
 });
 ```
 
-`renderRunStatus(status, { mount, csrfToken, csrfField = "_csrf", error })` shows the summary
-(`.qube-run-summary`, inside `.qube-run-status.qube-sync-<status>.qube-run-<state>`, with
-`data-qube-sync-status`) and, for a failure, the error's detail (`.qube-run-error-detail`), or
-nothing before the record is sent. It takes a `SyncStatus` (or a bare `Run`, read without its
-link). Two buttons post back through `questions()`:
+`renderRunStatus(status, { mount, csrfToken, csrfField = "_csrf", error, connection })` shows the
+pill's few words (`.qube-run-summary`, inside `.qube-run-status.qube-sync-<status>.qube-run-<state>`,
+with `data-qube-sync-status`), why it failed or was cancelled (`.qube-run-reason`) and a failure's
+detail, what to do (`.qube-run-error-detail`), or nothing before the record is sent. It takes a
+`SyncStatus` (or a bare `Run`, read without its link). `connection` is the one the page is about
+(else the latest run's): while it's stalled, a status that's sending reads "Waiting for QuickBooks",
+says why (`.qube-run-stall`: QuickBooks isn't checking in, or is closed) and offers no redelivery,
+since the cause is known; the element gets `qube-connection-stalled` and `data-qube-stall`. Two
+buttons post back through `questions()`:
 
-- a start unconfirmed for a minute (`status.unconfirmed`) gets "Try the start again"
+- a start unconfirmed for a minute (`status.unconfirmed`) gets "Try sending again"
   (`.qube-retry-start`), posting to `qube/runs/:id/retry_start`, which resends it with the same
   reference;
 - a run that looks stuck (`run.looksStuck()`: QuBe Sync confirmed it, it hasn't ended, nothing has
   been heard for 10 minutes (`Run.QUIET_AFTER_SECONDS`), and it's running or waiting on a question
-  this app never received) says "No news from QuBe Sync about it for a while."
-  (`.qube-run-quiet`) and gets "Send its latest news again" (`.qube-redeliver`), posting to
-  `qube/runs/:id/redeliver`. That asks QuBe Sync to send the run's latest event again; it comes back
-  through the webhook route as usual, and one this app already applied is skipped by its revision.
-  Its webhook may have been lost while the app was down longer than QuBe Sync's retries.
+  this app never received) says "No update from QuickBooks for a while." (`.qube-run-quiet`) and
+  gets "Check for updates" (`.qube-redeliver`), posting to `qube/runs/:id/redeliver`. That asks
+  QuBe Sync to send the run's latest event again; it comes back through the webhook route as
+  usual, and one this app already applied is skipped by its revision. Its webhook may have been
+  lost while the app was down longer than QuBe Sync's retries.
 
-`renderQuestion(status, { mount, csrfToken, csrfField, nonce, error })` shows the run's open
-question, a form per choice posting to `qube/questions/runs/:id`, and a record field's box
-searching through your app, so the API key never reaches the browser. It takes a `SyncStatus` or a
-`Run`. Both return `""` when there's nothing to show, escape every value, and use `qube-` classes for
-your CSS; `mount` is where `questions()` is mounted. For other markup, write your own with
-`escapeHtml`, `SEARCH_SCRIPT` and `ROWS_SCRIPT`. A fixed list (a field's `enum`) shows as a select.
+`renderQuestion(status, { mount, csrfToken, csrfField, error })` shows the run's open question and
+a form per choice posting to `qube/questions/runs/:id`, a record field's box searching through your
+app, so the API key never reaches the browser. It takes a `SyncStatus` or a `Run`. Both return `""`
+when there's nothing to show, escape every value, and use `qube-` classes; `mount` is where
+`questions()` is mounted. Neither writes an inline script: the search boxes and rows fields need the
+behaviour script (`renderAssets`). A fixed list (a field's `enum`) shows as a select.
+
+Choices show by kind. A pick (an item of a `choose` list: an id ending `:<n>`, no fields) is a quiet
+option row ending in "Use this one"; with no picks, a plain choice before the first form is one too
+(a name clash's "Use the existing record"). Each form choice (one with fields) is its own section,
+"or" between it and what comes before, its submit the one filled button (only the first form's;
+later ones are secondary). The exits (none of these, cancel) sit in a row below, cancel as a ghost.
+A question with neither picks nor forms keeps its choices in one row, the first primary. So a screen
+never has more than one filled button. A choice's words ("None of these", "Use this one") are the
+prompt's own, as QuBe Sync sent them.
 
 A rows field (`add_transaction`'s one question for every record QuickBooks doesn't have) shows as a
-table: a row per record with the columns it asks, a column shown only while its `when` holds, a
-search per record column (sent with the row: `search(url, { field: "records.list_id", q, row })`),
-and a "Set selected" bar that fills a column on every ticked row. Its inputs are named
-`data[<field>][<row key>][<column>]`, and its answer is `{ records: { <row key>: { <column>: value } } }`.
+block per record, never a table: the record's name, its choice (an enum column of up to three
+options, such as create or use, as a segmented control), then only the fields its answers so far
+call for (each column shown while its `when` holds), a search per record column sent with the row
+(`search(url, { field: "records.list_id", q, row })`). "Set all to:" sets that choice on every
+record, and "Use for all N" under a filled search or select copies it to the other records that ask
+it and are still empty. Its inputs are named `data[<field>][<row key>][<column>]`, and its answer is
+`{ records: { <row key>: { <column>: value } } }`.
 
 When an answer, a retry or a redelivery can't go through, the route redirects back with a message.
 `takeError(req, res)` (`qubesync/express`) reads it once: from `req.flash` when your app has
 connect-flash, else the session when it has one, else a short-lived `qube_error` cookie (HttpOnly,
 SameSite=Lax, a minute). Pass it as `error` to one of `renderRunStatus` or `renderQuestion`, which
-shows it as `<p class="qube-error">`. Without Express, the kit's functions resolve to
+shows it as `<p class="qube-error" role="alert">`. Without Express, the kit's functions resolve to
 `{ status: 303, error }` for these; keep the message your own way and show it once.
 
 An answer QuBe Sync takes puts the run back to `running` at once (`operation.answered(token, {
 taken: true })`), so its status reads `sending`, not `needs_answer`, until the run's next webhook,
 which waits on the Web Connector's next poll. A question that changed leaves the state alone.
 
-The page doesn't update itself when the run's next event comes: Node has no standard push to the
-page (qube_rails uses Turbo's page refreshes), so the user reloads to see the next question or the
-ending. A page of your own can poll a route that renders the status, or push it over your app's
-WebSocket from your handlers.
+The page doesn't update itself when the run's next event comes, or when its connection stalls or
+resumes: Node has no standard push to the page (qube_rails uses Turbo's page refreshes), so the user
+reloads to see the next question or the ending. A page of your own can poll a route that renders the
+status, or push it over your app's WebSocket from your handlers.
+
+### Styling
+
+The screens are plain, semantic HTML with `qube-` classes. Make them match your app three ways,
+from least to most work; [the storyboard](#the-storyboard) shows every screen at once while you do.
+
+#### 1. The stylesheet and its variables
+
+`renderAssets({ mount, stylesheet: true, nonce })` writes the behaviour script's tag
+(`<mount>/qube/assets/question.js`, deferred, with your CSP nonce when you pass one) and, with
+`stylesheet: true`, the opt-in stylesheet's (`<mount>/qube/assets/qubesync.css`). `questions()`
+serves both, so `mount` is where it's mounted. To serve them your own way (a bundler, a CDN), they're
+the package's files `qubesync/kit/question.js` and `qubesync/kit/qubesync.css`
+(`require.resolve(...)`, or `QUESTION_SCRIPT_PATH` and `STYLESHEET_PATH`). Without the stylesheet
+nothing of ours styles your page. The script is a file, not an inline script, so it needs no nonce
+under a `script-src 'self'` policy; pass one if your policy keys on nonces.
+
+Every rule in `qubesync.css` is inside `:where()`, so it has no specificity and any rule of yours
+wins. It has no reset and no global styles. Theme it with CSS variables on `:root` or any element
+around the screens:
+
+```css
+:root {
+  --qube-accent: #4f46e5;      /* the primary button, focus rings, highlights; default: a calm blue */
+  --qube-accent-text: #fff;    /* text on the accent */
+  --qube-border: #e5e7eb;      /* hairlines; default: the text colour, faded */
+  --qube-control-border: #d1d5db; /* inputs and secondary buttons */
+  --qube-radius: 8px;          /* cards; controls take 2px less */
+  --qube-gap: 16px;
+  --qube-font: inherit;        /* default: the system font stack */
+  --qube-font-size: 0.875rem;
+  --qube-muted: #6b7280;
+  --qube-error: #c2410c;
+  --qube-success: #15803d;     /* the status dot once it's in QuickBooks */
+  --qube-warning: #d97706;     /* the status dot while it needs an answer or waits on a stalled connection */
+  --qube-surface: #fff;        /* cards, inputs, the matches; default: Canvas */
+  --qube-max-width: 52rem;     /* the question card */
+}
+```
+
+Light and dark follow your page's `color-scheme`: with `color-scheme: light dark` (or `dark`) on your
+page, the accent and status colours take their dark-mode shades and the surfaces follow `Canvas`.
+Motion is short (transform and opacity only), and with `prefers-reduced-motion: reduce` the
+movement goes. It's the same stylesheet as qube_rails', so the screens look the same in both.
+
+#### 2. Class hooks
+
+The `uiClasses` setting (or a render's `uiClasses` option, over it) adds your CSS framework's
+classes beside the `qube-` ones, by piece:
+
+```js
+// Bootstrap
+configure({
+  uiClasses: {
+    button: "btn btn-primary", button_secondary: "btn btn-outline-secondary", input: "form-control",
+    select: "form-select", checkbox: "form-check-input", label: "form-label",
+    error: "alert alert-danger", status: "alert alert-light", search_result: "list-group-item list-group-item-action",
+  },
+});
+// Tailwind
+configure({ uiClasses: { button: "rounded bg-indigo-600 px-3 py-1.5 text-white", input: "rounded border-gray-300" } });
+```
+
+| Piece | Where |
+| --- | --- |
+| `question` | the question's `<section>` |
+| `message`, `details` | its sentence, its label/value table |
+| `choice` | each choice's `<form>` |
+| `button`, `button_secondary`, `button_ghost` | the one primary button (a form choice's submit, or a plain question's first choice; the retry button), the secondary ones (other exits, later forms, redeliver, "Set all to" options), and cancel (`button_ghost`, else `button_secondary`) |
+| `picks`, `pick`, `pick_detail`, `pick_action` | the picks' list, each pick's option-row button (never `button`), its detail, its "Use this one" |
+| `choice_footer`, `choice_divider` | the exits' row; the "or" between picks and a form |
+| `choice_detail`, `choice_description` | a choice's detail (in its button) and description |
+| `field`, `label` | a field's wrapper and its label (and the rows field's) |
+| `input`, `select`, `checkbox` | text, number and search inputs; selects; checkboxes |
+| `search`, `search_results`, `search_result` | a search box's wrapper, its matches' container, each match (made by the script) |
+| `rows`, `row`, `row_header`, `row_fields` | a rows field's list of records, each record, its name, its fields' grid |
+| `segmented`, `segment` | a record's choice as a segmented control, each option |
+| `use_for_all` | the "Use for all N" button under a field |
+| `status`, `summary`, `reason`, `detail` | the run status, its few words, why, what to do |
+| `stall` | why it waits on a stalled connection |
+| `error` | a one-shot error |
+
+Values are a string or an array of them (`UI_PIECES` lists the pieces). An unknown piece throws,
+naming them.
+
+#### 3. Replacing a piece
+
+Each screen is made of small pieces, each a function `(view, ctx) → HTML` from its view-model. The
+`pieces` setting (or a render's `pieces` option, over it) replaces any of them by name; the rest stay
+the kit's. `renderQuestion` and `renderRunStatus` don't change.
+
+```js
+configure({
+  pieces: {
+    "fields/boolean": (field, ctx) =>
+      `<div class="form-check form-switch">
+         <input class="form-check-input" type="checkbox" role="switch" id="${ctx.escape(field.domId)}"
+                name="${ctx.escape(field.inputName)}" value="true">
+         <label class="form-check-label" for="${ctx.escape(field.domId)}">${ctx.escape(field.label)}</label>
+       </div>`,
+  },
+});
+```
+
+| Piece | View-model (and `ctx` locals) | Renders |
+| --- | --- | --- |
+| `question` | `QuestionView` | the section: error, message, details, choices |
+| `message`, `details` | `QuestionView` | the sentence; the label/value rows |
+| `picks`, `pick` | `QuestionView`; `ChoiceView` (`ctx.question`) | the picks' list; one pick, a form posting `choice` |
+| `choice` | `ChoiceView` (`ctx.question`) | a form or exit choice: a form posting `choice` and `data[...]` with your CSRF token (`ctx.csrf`) |
+| `footer` | `QuestionView` | the exits' row |
+| `field` | `FieldView` (`ctx.control`, the control's HTML) | a field's wrapper and label around its control |
+| `fields/text`, `fields/number`, `fields/boolean`, `fields/select`, `fields/search`, `fields/rows` | `FieldView` | one field, by `field.type` (`field.piece`) |
+| `rows/row` | `RowView` (`ctx.rows`, its `RowsView`) | one record: its name, its choice, its fields |
+| `rows/cell` | `CellView` | one field of a record (shown while its `when` holds), or what it already has |
+| `rows/segmented` | `FieldView` | a short enum as a segmented control (radios posted as `field.inputName`) |
+| `run_status/status` | `RunStatusView` | the error, then the status: summary, reason and detail, stall, buttons |
+| `run_status/summary`, `run_status/detail`, `run_status/stall`, `run_status/retry`, `run_status/redeliver` | `RunStatusView` | each part (`run_status/stall` while its connection is stalled) |
+| `error` | the message (a string, or `null` for nothing) | a one-shot error |
+
+`ctx` has `render(name, view, locals)` (another piece, yours where you've replaced it), `classes(piece,
+...base)` (the base classes, then your `uiClasses`' for that piece), `t(key, vars)` (the words for a
+message key), `escape`, `attrs(object)` (attributes, escaped), and `csrf` (your token's hidden input,
+or `""`). Escape every value you write. The kit's own pieces are `PIECES` (`PIECE_NAMES` lists them),
+so yours can wrap one:
+
+```js
+const { PIECES } = require("qubesync/kit");
+configure({ pieces: { message: (view, ctx) => `<div class="card-header">${PIECES.message(view, ctx)}</div>` } });
+```
+
+The view-models are plain objects (`kit/views.js`); their fields are the contract, kept stable across
+versions, and named as qube_rails' in camelCase:
+
+- `QuestionView`: `picks`, `forms`, `exits`, `plain` (see the choices above), `message`, `details` (each
+  `label`, `value`), `choices`, `token`, `actionUrl`, `searchUrl`, `error` (QuBe Sync's refusal, or
+  null), `prompt` (as QuBe Sync sent it). `QuestionView.fromRun(run, { urls, error })`.
+- `ChoiceView`: `id`, `label`, `detail`, `description`, `fields`, `index`, `actionUrl`, `secondary`
+  (cancel), `kind` (`"pick"`, `"form"` or `"exit"`), `style` (its button's: `"primary"`,
+  `"secondary"`, `"ghost"`, or null for a pick) and `buttonPiece` (its `uiClasses` piece).
+- `FieldView`: `name`, `inputName` (post your value under it), `domId`, `type` (`text`, `number`,
+  `boolean`, `select`, `search` or `rows`), `label`, `required`, `options` (a select's, each `value` and
+  `label`), `kind` (a search's record kind), `searchUrl`, `searchField`, `rowKey`, `when`, `rows` (a
+  `RowsView`), `context` (`"choice"` or `"cell"`), `disabled`, `piece`, `labelled`, `cell` (a rows
+  field's), `data` (its `data-*` attributes) and `segmented` (a cell's enum of up to three options).
+- `RowsView`: `name`, `label`, `inputName`, `searchUrl`, `columns` (FieldViews), `rows`, `setAll`
+  (the column "Set all to:" sets, or null). `RowView`: `key`, `label`, `detail`, `values`,
+  `valuesJson`, `index`, `cells` (the columns it asks or already has a value for), `segmentedCells`,
+  `fieldCells`. `CellView`: `column`, `label`, `field` (null for a value the row already has),
+  `preset` (that value, read-only), `when`, `whenJson`, `shown`, `hidden`, `required` (the column's;
+  a hidden field isn't required until shown), `segmented`.
+- `RunStatusView`: `status` (`"not_sent"`, `"sending"`, `"needs_answer"`, `"in_quickbooks"`, `"done"`,
+  `"failed"`, `"cancelled"`), `state` (the run's), `summary` (a few words, for the pill), `reason` (why
+  it failed or was cancelled, a sentence), `detail`, `quietText`, `retryUrl` and `redeliverUrl` (null
+  when the button doesn't apply; post to them), `error`, `stall` (the stalled connection's reason, such
+  as `"not_checking_in"` or `"quickbooks_unavailable"`, while a sending status waits on it; else null),
+  `stallText`, `visible`, `cssClass`. `RunStatusView.fromSync(sync, { urls, error, connection, now })`.
+
+A piece of yours posts its value as `field.inputName`, so the route reads it as it reads ours: a
+checkbox `"true"`, a number as typed, a rows cell `data[<field>][<row key>][<column>]`.
+
+#### The behaviour script
+
+`question.js` has one set of listeners on `document`, keyed only on `data-qube-*` attributes, so it
+works on your own pieces' markup when it carries them. Include it once per page (`renderAssets`); it
+loads once however often it's included, needs no build, and is the same file as qube_rails'.
+
+- A search: an element with `data-qube-search="<search URL>"`, `data-qube-field="<field>"` and, in a
+  rows field, `data-qube-row="<row key>"`, holding a text input `data-qube-search-input`, a hidden
+  input `data-qube-search-value` (the one with the name, which gets the picked `value`) and a
+  container `data-qube-search-results`. Typing two characters or more asks the search URL; each
+  match is a button (classes from `data-qube-result-class`, `role="option"`), the match's detail
+  under its name; picking one (a click, or the arrow keys and Enter) fills the hidden input and fires
+  `change` on it and `qube:picked` on the box. Until a match is picked, the text input is invalid,
+  so the form isn't sent. Its words come from the box's `data-qube-text-no-matches`, `-searching`,
+  `-search-failed` and `-pick-a-match`.
+- A rows field: `data-qube-rows` around it; each record `data-qube-row` with `data-qube-values` (JSON);
+  each field `data-qube-col="<column>"` with `data-qube-when` (JSON) and, for a required column,
+  `data-qube-required`; each input `data-qube-rows-input`. A field whose `when` doesn't hold is
+  `hidden` (and `data-qube-hidden`), its inputs disabled and not required, so it's neither sent nor
+  asked for. Optional: `data-qube-rows-set-all="<column>"` holding buttons `data-qube-set-all="<value>"`,
+  and a button `data-qube-use-for-all` in a field (with the field's `data-qube-text-use-for-all`,
+  "Use for all %{count}").
+- A form choice (`data-qube-choice-kind="form"`) whose required fields are all searches: its submit
+  is disabled until each has a pick (by the script only, so it still posts without it).
+- The storyboard: a button `data-qube-copy="<text>"` copies its text.
+
+Your own combobox can skip the script: it needs only the search route,
+`GET <question action>/search?field=<field>&q=<2 to 100 characters>[&row=<row key>]` →
+`[{ "value", "label", "detail" }]` (at most 20; `field.searchUrl` is the whole URL), and a hidden input
+named `field.inputName` holding the picked `value`.
+
+### Wording and translations
+
+Everything the screens and the routes' messages say to your users has a key, with English in
+`MESSAGES` (`MESSAGE_KEYS` lists them). Nothing names QuBe Sync: to your users it's QuickBooks.
+The `messages` setting rewords any of them, nested or dotted; a render's `messages` option does the
+same for one render, over the setting. An unknown key throws, listing them. To translate, set them
+all from your own locale files (the setting is per process, so for per-request languages pass
+`messages` to each render).
+
+```js
+configure({
+  messages: {
+    status: { running: "Syncing with your accounts" },
+    "errors.unreachable": "Couldn't reach the accounting sync just now. Try again in a minute.",
+  },
+});
+```
+
+| Key | English | Where |
+| --- | --- | --- |
+| `status.in_quickbooks` | In QuickBooks | the status, linked |
+| `status.added` | Added to QuickBooks | the status, an add that completed |
+| `status.done`, `status.done_with` | Done; Done: %{outcome} | the status, completed |
+| `status.failed` | Couldn't sync | the status, failed (why is `reasonText`, below it) |
+| `status.not_started` | it couldn't be sent | a failure's message for a start that never went out |
+| `status.cancelled` | Cancelled | the status, cancelled (the reason, if any, below it) |
+| `status.cancel_reason` | it was stopped before it finished | `run.cancelReasonText()` with no reason |
+| `status.needs_answer` | Needs your answer | the status, asking a question |
+| `status.starting` | Sending to QuickBooks | the status, just started |
+| `status.unconfirmed` | Still waiting for QuickBooks | the status, a start unconfirmed for a minute |
+| `status.running` | Syncing with QuickBooks | the status, running |
+| `status.quiet` | No update from QuickBooks for a while. | above the redeliver button |
+| `status.check_for_updates` | Check for updates | the redeliver button |
+| `status.try_again` | Try sending again | the retry button |
+| `status.waiting_for_quickbooks` | Waiting for QuickBooks | the status while its connection is stalled |
+| `status.stalled.not_checking_in` | QuickBooks hasn't checked in for a while, so this is waiting. Make sure the computer with QuickBooks is on and the Web Connector is running. | why, when the Web Connector isn't calling in |
+| `status.stalled.quickbooks_unavailable` | The Web Connector is checking in but can't open QuickBooks. Open the company file in QuickBooks on that computer. | why, when QuickBooks is closed |
+| `status.stalled.other` | Syncing with QuickBooks has stopped for now. Check the computer with QuickBooks and its Web Connector. | any other stall reason |
+| `errors.not_starting` | This was already sent, so there's nothing to try again. | a retry of a start that isn't waiting (`NOT_STARTING`) |
+| `errors.not_quiet` | This was updated recently. Check again in a few minutes. | a redeliver of a run that isn't quiet (`NOT_QUIET`) |
+| `errors.no_update_yet` | There's no update yet. Check again in a few minutes. | a redeliver with nothing to send (`REDELIVERY_REFUSED[409]`) |
+| `errors.checked_just_now` | That was checked a moment ago. Try again in a minute. | a redeliver asked too soon (`REDELIVERY_REFUSED[429]`) |
+| `errors.unreachable` | Couldn't reach QuickBooks' sync service just now. Try again in a minute. | a redeliver QuBe Sync didn't answer (`NO_ANSWER`) |
+| `errors.disconnect_unreachable` | Couldn't reach QuickBooks' sync service just now. Try disconnecting again in a minute. | a disconnect QuBe Sync didn't answer (`DISCONNECT_NO_ANSWER`) |
+| `errors.still_syncing` | Something is still syncing with this company file. Let it finish, or answer its question, then disconnect. | a disconnect while work is going (`RUNS_GOING`) |
+| `errors.question_changed` | This question changed after the page loaded, so your answer wasn't sent. The page now shows the latest. | an answer to a changed question (`QUESTION_CHANGED`) |
+| `errors.answer_refused`, `errors.answer_refused_with` | That answer couldn't be used. Check it and try again.; That answer couldn't be used: %{detail} | an answer QuBe Sync refused (422) |
+| `question.set_all` | Set all to: | before a rows field's buttons that set every record's choice |
+| `question.use_for_all` | Use for all %{count} | under a filled field other records ask too |
+| `question.or` | or | between picks and a form choice |
+| `question.use_pick` | Use this one | at the end of each pick's row |
+| `question.pick_a_match` | Pick one of the matches. | a search box with text but no pick, on submit |
+| `question.no_matches`, `question.searching`, `question.search_failed` | No matches; Searching…; Search isn't available right now. Try again in a moment. | the search box's matches |
+
+`t(key, vars)` looks one up as the kit does. A question's own words (its message, details, choices
+and field labels) are QuBe Sync's prompt, in English.
+
+### The storyboard
+
+`storyboard()` (`qubesync/express`) serves `GET /qube/storyboard`: every screen your users can meet,
+from sample data, inside your own layout, so your CSS, `uiClasses`, `pieces` and `messages` apply:
+the run status (not sent, starting, an unconfirmed start with its retry button, running, waiting on a
+stalled connection (QuickBooks not checking in, or closed), waiting for an answer, looking stuck with
+its redeliver button, in QuickBooks, done, failed with its reason and detail, cancelled), the one-shot
+error, and a question of each kind (a near match, a record search, a pick from a list, a fixed list,
+number and yes/no fields, a name clash, a lost answer, a missing customer, records not in QuickBooks
+yet, and a refused answer). Each screen is a section with a note and its "Pieces to replace" (each
+with a Copy button); the canvas can be shown as your page is, light or dark. `GET
+/qube/storyboard/<screen>` shows one.
+
+```js
+app.use(requireSignIn);
+app.use(qube.questions(config));
+app.use(
+  qube.storyboard({
+    layout: (body, { title, assets }) => renderLayout({ title, head: assets, body }), // your page
+    csrfToken: (req) => req.csrfToken(),
+  })
+);
+```
+
+`layout(body, { title, req, assets })` returns the page (`assets` is
+`renderAssets({ mount, stylesheet: true })` for its `<head>`); without one it's a bare page with the
+stylesheet. It's on while the `storyboard` setting is true (by default, when `NODE_ENV` is
+`"development"`; 404 otherwise); mount it behind your sign-in. It calls nothing: its searches answer
+from the samples (`kit/storyboard/*.json`, prompts shaped as QuBe Sync sends them), its forms post to
+a no-op that comes back with "Storyboard: nothing was sent.", and no row is written. Without Express,
+`kit.storyboard` has the screens (`screens()`, `findScreen`, `matches`) and `render({ mount, list,
+notice })`, the body.
 
 ### Sync status
 

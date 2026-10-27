@@ -25,6 +25,10 @@ const KEYS = Object.freeze([
   "jobAttempts",
   "pruneRunsAfter",
   "connectionType",
+  "messages",
+  "uiClasses",
+  "pieces",
+  "storyboard",
   "apiKey",
   "baseUrl",
   "webhookSecret",
@@ -48,6 +52,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const CONNECTION_TYPES = Object.freeze(["realtime", "standard"]);
 
 let values = {};
+const EMPTY = Object.freeze({});
 let changes = 0; // bumped by configure, so client() knows to make a new Client
 
 function notConfigured(key, what) {
@@ -147,6 +152,13 @@ const CHECKS = {
     if (!CONNECTION_TYPES.includes(value)) {
       throw new TypeError(`QuBe Sync: connectionType is "realtime" or "standard", in ${CONFIG_FILE}`);
     }
+    return value;
+  },
+  messages: (value) => require("./messages").checkMessages(value),
+  uiClasses: (value) => require("./pieces").checkUiClasses(value),
+  pieces: (value) => require("./pieces").checkPieces(value),
+  storyboard(value) {
+    if (typeof value !== "boolean") throw new TypeError(`QuBe Sync: storyboard is true or false, in ${CONFIG_FILE}`);
     return value;
   },
   apiKey: (value) => checkString("apiKey", value),
@@ -285,6 +297,26 @@ class Settings {
     return values.connectionType || "realtime";
   }
 
+  /** Your words for the screens' messages, by dotted key ({} until set). */
+  get messages() {
+    return values.messages || EMPTY;
+  }
+
+  /** Your CSS framework's classes by piece (UI_PIECES), beside the qube- ones ({} until set). */
+  get uiClasses() {
+    return values.uiClasses || EMPTY;
+  }
+
+  /** Your own pieces, by name (PIECE_NAMES), in place of the kit's ({} until set). */
+  get pieces() {
+    return values.pieces || EMPTY;
+  }
+
+  /** Whether the storyboard router shows its screens. Default: NODE_ENV is "development". */
+  get storyboard() {
+    return values.storyboard === undefined ? process.env.NODE_ENV === "development" : values.storyboard;
+  }
+
   get apiKey() {
     return values.apiKey || fromEnv("apiKey");
   }
@@ -336,6 +368,8 @@ class Settings {
       else if (key === "jobAttempts") described[key] = this.jobAttempts;
       else if (key === "pruneRunsAfter") described[key] = this.pruneRunsAfter;
       else if (key === "connectionType") described[key] = this.connectionType;
+      else if (key === "storyboard") described[key] = this.storyboard;
+      else if (key === "messages" || key === "uiClasses" || key === "pieces") described[key] = Object.keys(this[key]);
       else if (key === "baseUrl" || key === "webhookUrl") {
         described[key] = values[key] || process.env[ENV[key]] || (key === "baseUrl" ? DEFAULT_BASE_URL : "[unset]");
       } else described[key] = values[key] ? "[set]" : "[default]";

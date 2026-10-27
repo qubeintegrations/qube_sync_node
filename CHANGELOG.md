@@ -2,6 +2,42 @@
 
 ## 0.3.0 (unreleased)
 
+From qube_rails' styling, storyboard and design pass (2026-10-27, qube_rails 3ce8ea6):
+
+- **Pieces on view-models**: `renderQuestion` and `renderRunStatus` are made of pieces (`question`,
+  `message`, `details`, `picks`, `pick`, `choice`, `footer`, `field`, `fields/text|number|boolean|select|search|rows`,
+  `rows/row|cell|segmented`, `run_status/status|summary|detail|stall|retry|redeliver`, `error`), each
+  `(view, ctx) → HTML` from a view-model: `QuestionView`, `ChoiceView`, `FieldView`, `RowsView`,
+  `RowView`, `CellView`, `RunStatusView`, the override contract (qube_rails' fields, camelCase). The
+  `pieces` setting, or a render's `pieces` option, replaces any of them; `PIECES` are the kit's.
+- **Choices by kind**: picks as option rows ending "Use this one", each form choice its own section
+  ("or" between), exits in a footer; at most one filled button (`data-qube-button`,
+  `data-qube-choice-kind`).
+- **Rows without a table**: a block per record, a segmented choice for a short enum, only the
+  fields its answers call for, "Set all to:" and "Use for all N". The table, its "Set selected" bar
+  and `ROWS_SCRIPT`/`SEARCH_SCRIPT` are gone; the answer's names (`data[<field>][<row key>][<column>]`)
+  are unchanged.
+- **Class hooks**: the `uiClasses` setting (and option), with qube_rails' pieces (`UI_PIECES`); an
+  unknown piece throws, naming them.
+- **The behaviour script and the stylesheet**: qube_rails' `question.js` and `qube_rails.css`, as the
+  package's `qubesync/kit/question.js` and `qubesync/kit/qubesync.css` (`QUESTION_SCRIPT_PATH`,
+  `STYLESHEET_PATH`), served by `questions()` at `qube/assets/question.js` and
+  `qube/assets/qubesync.css`; `renderAssets({ mount, stylesheet, nonce })` writes their tags. No
+  inline script any more (`renderQuestion`'s `nonce` is unused).
+- **Wording**: every word the screens and routes say has a key (`MESSAGES`, `MESSAGE_KEYS`, `t`),
+  reworded by the `messages` setting or a render's `messages` option, and none names QuBe Sync.
+  `run.summaryText()` is a few words ("Couldn't sync", "Cancelled", "Sending to QuickBooks", "Still
+  waiting for QuickBooks", "Syncing with QuickBooks", "Needs your answer"); why is the new
+  `run.reasonText()`, shown below it. `QUESTION_CHANGED`, `NOT_STARTING`, `NOT_QUIET`,
+  `REDELIVERY_REFUSED`, `NO_ANSWER`, `RUNS_GOING` and `DISCONNECT_NO_ANSWER` are message keys now; the
+  results carry their words.
+- **Stalled connections**: `renderRunStatus(..., { connection })`; while the connection is stalled, a
+  sending status reads "Waiting for QuickBooks", says why (`run_status/stall`) and offers no redelivery.
+- **The storyboard**: `storyboard({ layout, csrfToken })` (`qubesync/express`) serves
+  `GET qube/storyboard` and `qube/storyboard/:screen`, every screen from qube_rails' samples in your
+  layout, with a sample search and a no-op answer, while the `storyboard` setting is true (default:
+  `NODE_ENV` is `"development"`). `kit.storyboard` has the screens for other frameworks.
+
 From qube_rails' second round (2026-10-27):
 
 - **Rows questions**: `renderQuestion` shows a rows field as a table (`add_transaction`'s one

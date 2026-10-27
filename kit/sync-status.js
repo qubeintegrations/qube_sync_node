@@ -5,6 +5,7 @@
 // the rules.
 
 const { Run, recordKey } = require("./records");
+const { t } = require("./messages");
 
 const STATUSES = Object.freeze(["not_sent", "sending", "needs_answer", "in_quickbooks", "done", "failed", "cancelled"]);
 
@@ -68,10 +69,11 @@ function stoppedSinceLink(run, link) {
   return time(link.updatedAt) <= time(ended);
 }
 
-function summaryOf(status, run, now) {
+// The pill's few words; messages are a render's own words over the setting's.
+function summaryOf(status, run, now, messages) {
   if (status === "not_sent") return null;
-  if (status === "in_quickbooks" && (!run || run.state !== "completed")) return "In QuickBooks";
-  return run.summaryText(now);
+  if (status === "in_quickbooks" && (!run || run.state !== "completed")) return t("status.in_quickbooks", null, messages);
+  return run.summaryText(now, messages);
 }
 
 function time(value) {
@@ -166,4 +168,4 @@ function sendingSql(connection, table, options) {
   return runScopeSql(connection, table, options, ["starting", "running"]);
 }
 
-module.exports = { SyncStatus, STATUSES, inQuickbooksSql, notInQuickbooksSql, needingAnswerSql, sendingSql };
+module.exports = { SyncStatus, STATUSES, summaryOf, inQuickbooksSql, notInQuickbooksSql, needingAnswerSql, sendingSql };

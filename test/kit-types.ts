@@ -26,7 +26,12 @@ import {
   RUNS_GOING,
   renderQuestion,
   renderRunStatus,
-  ROWS_SCRIPT,
+  renderAssets,
+  QuestionView,
+  RunStatusView,
+  PIECES,
+  storyboard,
+  t,
   run,
   withoutNils,
 } from "qubesync/kit";
@@ -44,7 +49,7 @@ import type {
   Store,
   WorkflowRunEvent,
 } from "qubesync/kit";
-import { connect, questions, takeError, webhooks } from "qubesync/express";
+import { connect, questions, storyboard as storyboardRouter, takeError, webhooks } from "qubesync/express";
 import { connectQuickbooks, disconnectQuickbooks, redeliver, receiveWebhook } from "qubesync/kit";
 import storeTests = require("qubesync/kit/store-tests");
 
@@ -190,7 +195,7 @@ app.get("/invoices/:id", async (req, res) => {
   void [row.state, queued.done(), queued.webhookUrl(), since];
   const error: string | null = takeError(req, res);
   const where: string = connection.inQuickbooksSql("invoices", { recordType: "Invoice" }) + connection.sendingSql("invoices", { recordType: "Invoice", operation: "create_invoice", dialect: "mysql" });
-  res.send(renderRunStatus(sync, { error }) + renderQuestion(sync) + name + qbId + retry + stuck + reused + where + REDELIVERY_REFUSED[409] + SIGNATURE_HINTS.stale + ROWS_SCRIPT);
+  res.send(renderRunStatus(sync, { error }) + renderQuestion(sync) + name + qbId + retry + stuck + reused + where + REDELIVERY_REFUSED[409] + SIGNATURE_HINTS.stale + renderAssets({ stylesheet: true }));
 });
 
 async function routes(req: Request): Promise<number> {
@@ -228,6 +233,26 @@ async function rows(s: Store): Promise<[ConnectionRow | null, RunRow | null]> {
 storeTests(async () => memoryStore());
 storeTests(async () => memoryStore(), { dialect: "sqlite", query: async (_store, sql) => [{ sql }] });
 
+// Styling: the settings, a piece of the app's own, the view-models and the storyboard.
+configure({
+  uiClasses: { button: ["btn", "btn-primary"], input: "form-control" },
+  messages: { status: { running: "Syncing" }, "errors.unreachable": "Try again soon." },
+  storyboard: false,
+  pieces: {
+    "fields/boolean": (field, ctx) => `<label>${ctx.escape(field.label)}<input type="checkbox" name="${ctx.escape(field.inputName)}" value="true"></label>`,
+    message: (question: QuestionView, ctx) => `<h3 class="${ctx.classes("message", "qube-question-message")}">${ctx.escape(question.message)}</h3>`,
+  },
+});
+async function styled(sync: SyncStatus): Promise<string> {
+  const view = RunStatusView.fromSync(sync, { now: new Date() });
+  const asked = QuestionView.fromRun(sync.run);
+  const picks: string[] = asked ? asked.picks.map((c) => `${c.kind}:${c.style}`) : [];
+  return `${view.summary}${view.stall}${picks.join()}${PIECES.error(null, null as any)}${storyboard.screens().length}${t(RUNS_GOING)}`;
+}
+const board: import("express").Router = storyboardRouter({ layout: (body, { title, assets }) => `<title>${title}</title>${assets}${body}`, csrfToken: () => "t" });
+
 void page;
 void worker;
+void styled;
+void board;
 void rows;

@@ -23,6 +23,10 @@ const job = require("./job");
 const onboarding = require("./onboarding");
 const questions = require("./questions");
 const render = require("./render");
+const views = require("./views");
+const pieces = require("./pieces");
+const messages = require("./messages");
+const storyboard = require("./storyboard");
 const mapping = require("./mapping");
 
 module.exports = {
@@ -94,9 +98,37 @@ module.exports = {
   // HTML
   renderQuestion: render.renderQuestion,
   renderRunStatus: render.renderRunStatus,
+  renderAssets: render.renderAssets,
   escapeHtml: render.escapeHtml,
-  SEARCH_SCRIPT: render.SEARCH_SCRIPT,
-  ROWS_SCRIPT: render.ROWS_SCRIPT,
+  QUESTION_SCRIPT_PATH: render.QUESTION_SCRIPT_PATH,
+  STYLESHEET_PATH: render.STYLESHEET_PATH,
+  ASSET_ROUTES: render.ASSET_ROUTES,
+  // The view-models (the pieces' contract) and the pieces
+  QuestionView: views.QuestionView,
+  ChoiceView: views.ChoiceView,
+  FieldView: views.FieldView,
+  RowsView: views.RowsView,
+  RowView: views.RowView,
+  CellView: views.CellView,
+  RunStatusView: views.RunStatusView,
+  routes: views.routes,
+  PIECES: pieces.PIECES,
+  PIECE_NAMES: pieces.PIECE_NAMES,
+  UI_PIECES: pieces.UI_PIECES,
+  renderer: pieces.renderer,
+  // Wording
+  MESSAGES: messages.MESSAGES,
+  MESSAGE_KEYS: messages.MESSAGE_KEYS,
+  t: messages.t,
+  // The storyboard
+  storyboard: {
+    QUESTIONS: storyboard.QUESTIONS,
+    NOTHING_SENT: storyboard.NOTHING_SENT,
+    screens: storyboard.screens,
+    findScreen: storyboard.findScreen,
+    matches: storyboard.matches,
+    render: storyboard.renderStoryboard,
+  },
   // Mapping helpers
   get: mapping.get,
   rows: mapping.rows,

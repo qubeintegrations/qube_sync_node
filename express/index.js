@@ -7,7 +7,9 @@
 //   app.use(express.json());
 //   app.use(requireSignIn);    // your sign-in, and your CSRF protection
 //   app.use(connect());        // POST /quickbooks/connections, .../:id/onboarding, DELETE .../:id
-//   app.use(questions());      // POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start and /redeliver
+//   app.use(questions());      // POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start and /redeliver,
+//                              // GET /qube/assets/question.js and qubesync.css
+//   app.use(storyboard());     // GET /qube/storyboard(/:screen): every screen with sample data, in development
 //
 // Each is optional: mount the ones your app uses. The routes are relative to where they're
 // mounted (app.use("/app", connect()) serves POST /app/quickbooks/connections). What they do is
@@ -21,6 +23,7 @@ const ROUTER_OPTIONS = {
   webhooks: [],
   connect: [],
   questions: ["limit"],
+  storyboard: ["layout", "csrfToken", "csrfField"],
 };
 
 function loadExpress() {
@@ -272,7 +275,101 @@ function questions(options) {
       send(req, res, await kit.redeliver({ runId: req.params.id, request: req }));
     })
   );
+  assetRoutes(router);
   return router;
+}
+
+// The behaviour script and the opt-in stylesheet, as files (renderAssets writes their tags).
+function assetRoutes(router) {
+  const serve = (file, type) => (req, res) => {
+    res.type(type);
+    res.set("Cache-Control", "public, max-age=3600");
+    res.sendFile(file);
+  };
+  router.get(kit.ASSET_ROUTES.script, serve(kit.QUESTION_SCRIPT_PATH, "application/javascript"));
+  router.get(kit.ASSET_ROUTES.stylesheet, serve(kit.STYLESHEET_PATH, "text/css"));
+}
+
+/**
+ * GET /qube/storyboard and /qube/storyboard/:screen: every screen renderRunStatus and
+ * renderQuestion show, from sample data, with your pieces, uiClasses and messages, inside
+ * options.layout(body, { title, req, assets }) (default: a bare page with the stylesheet). Its
+ * searches answer from the samples (GET .../:screen/search) and its forms post to a no-op (POST
+ * .../:screen/answer), so nothing reaches QuBe Sync or the store. Only while the storyboard setting
+ * is true (by default, when NODE_ENV is "development"); 404 otherwise. Mount it behind your
+ * sign-in. options.csrfToken: (req) → your CSRF token for its forms; options.csrfField: its name.
+ */
+function storyboard(options) {
+  const express = loadExpress();
+  const { layout = defaultLayout, csrfToken = null, csrfField = "_csrf" } = routerOptions("storyboard", options);
+  if (typeof layout !== "function") throw new TypeError("QuBe Sync: storyboard({ layout }) takes a function (body, { title, req, assets }) → HTML");
+  if (csrfToken !== null && typeof csrfToken !== "function") throw new TypeError("QuBe Sync: storyboard({ csrfToken }) takes a function (req) → token");
+  const router = express.Router();
+  const form = express.urlencoded({ extended: false });
+  const board = kit.storyboard;
+
+  router.use("/qube/storyboard", (req, res, next) => (kit.settings().storyboard === true ? next() : res.sendStatus(404)));
+
+  const show = (req, res, list) => {
+    const body = board.render({
+      mount: req.baseUrl,
+      list,
+      notice: req.query.sent === "none" ? board.NOTHING_SENT : null,
+      csrfToken: csrfToken ? csrfToken(req) : null,
+      csrfField,
+    });
+    const assets = kit.renderAssets({ mount: req.baseUrl, stylesheet: true });
+    res.type("text/html").send(layout(body, { title: "QuickBooks screens", req, assets }));
+  };
+  const screenOf = (req, res) => {
+    const screen = board.findScreen(req.params.screen);
+    if (!screen) res.sendStatus(404);
+    return screen;
+  };
+
+  router.get("/qube/storyboard", handler(async (req, res) => show(req, res, board.screens())));
+  router.get(
+    "/qube/storyboard/:screen",
+    handler(async (req, res) => {
+      const screen = screenOf(req, res);
+      if (screen) show(req, res, [screen]);
+    })
+  );
+  router.get(
+    "/qube/storyboard/:screen/search",
+    handler(async (req, res) => {
+      const screen = screenOf(req, res);
+      if (screen) res.json(board.matches(screen, req.query.field, req.query.q));
+    })
+  );
+  router.post(
+    "/qube/storyboard/:screen/answer",
+    form,
+    handler(async (req, res) => {
+      const screen = screenOf(req, res);
+      if (screen) res.redirect(303, `${req.baseUrl}/qube/storyboard/${encodeURIComponent(screen.key)}?sent=none`);
+    })
+  );
+  assetRoutes(router);
+  return router;
+}
+
+// A bare page around the storyboard, for an app that passes no layout.
+function defaultLayout(body, { title, assets }) {
+  return [
+    "<!DOCTYPE html>",
+    `<html lang="en">`,
+    "<head>",
+    `<meta charset="utf-8">`,
+    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
+    `<title>${kit.escapeHtml(title)}</title>`,
+    assets,
+    "</head>",
+    "<body>",
+    body,
+    "</body>",
+    "</html>",
+  ].join("\n");
 }
 
 /**
@@ -294,4 +391,4 @@ function back(req) {
   return "/";
 }
 
-module.exports = { webhooks, connect, questions, takeError, redirectBack };
+module.exports = { webhooks, connect, questions, storyboard, takeError, redirectBack };

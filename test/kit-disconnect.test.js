@@ -93,13 +93,13 @@ describe("kit: disconnectQuickbooks", () => {
     const { account, connection, invoice } = await fixtures();
     const run = await makeRun(invoice, connection, { state: "awaiting_input" });
     let result = await kit.disconnectQuickbooks({ request: { account }, id: connection.id });
-    assert.deepStrictEqual(result, { status: 303, error: kit.RUNS_GOING });
-    assert.strictEqual(kit.RUNS_GOING, "It has a run or request that hasn't ended: wait for it, or answer its question, first.");
+    assert.deepStrictEqual(result, { status: 303, error: kit.t(kit.RUNS_GOING) });
+    assert.strictEqual(kit.t(kit.RUNS_GOING), "Something is still syncing with this company file. Let it finish, or answer its question, then disconnect.");
 
     await run.update({ state: "completed" });
     await makeRequest(invoice, connection, { state: "retryable" });
     result = await kit.disconnectQuickbooks({ request: { account }, id: connection.id });
-    assert.deepStrictEqual(result, { status: 303, error: kit.RUNS_GOING });
+    assert.deepStrictEqual(result, { status: 303, error: kit.t(kit.RUNS_GOING) });
     assert.strictEqual(fake.received.length, 0);
     assert.ok(await store().getConnection(connection.id));
   });
@@ -109,7 +109,7 @@ describe("kit: disconnectQuickbooks", () => {
     const { account, connection } = await fixtures();
     answer({ destroy: true });
     const result = await kit.disconnectQuickbooks({ request: { account }, id: connection.id });
-    assert.deepStrictEqual(result, { status: 303, error: kit.DISCONNECT_NO_ANSWER });
+    assert.deepStrictEqual(result, { status: 303, error: kit.t(kit.DISCONNECT_NO_ANSWER) });
     assert.ok(await store().getConnection(connection.id));
     answer(apiError(403, "forbidden"));
     await assert.rejects(kit.disconnectQuickbooks({ request: { account }, id: connection.id }), (err) => err.status === 403);

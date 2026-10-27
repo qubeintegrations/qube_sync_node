@@ -454,12 +454,12 @@ describe("express: disconnect", () => {
     reset();
     const { account, connection, run } = await fixtures();
     let res = await request(app(), form(`/quickbooks/connections/${connection.id}/disconnect`, {}, account));
-    assertBackWith(res, kit.RUNS_GOING);
+    assertBackWith(res, kit.t(kit.RUNS_GOING));
     assert.strictEqual(fake.received.length, 0);
     await run.update({ state: "completed" });
     answer({ destroy: true });
     res = await request(app(), form(`/quickbooks/connections/${connection.id}/disconnect`, {}, account));
-    assertBackWith(res, kit.DISCONNECT_NO_ANSWER);
+    assertBackWith(res, kit.t(kit.DISCONNECT_NO_ANSWER));
     assert.ok(await kit.Connection.get(connection.id));
   });
 
@@ -604,10 +604,10 @@ describe("express: questions", () => {
     reset();
     const { account, run } = await asking();
     let res = await request(app(), answerForm(run, { choice: "nope" }, account));
-    assertBackWith(res, kit.QUESTION_CHANGED, `/invoices/${run.recordId}`);
+    assertBackWith(res, kit.t(kit.QUESTION_CHANGED), `/invoices/${run.recordId}`);
     await run.update({ question: null, links: null });
     res = await request(app(), answerForm(run, { choice: "use:1" }, account));
-    assertBackWith(res, kit.QUESTION_CHANGED);
+    assertBackWith(res, kit.t(kit.QUESTION_CHANGED));
     assert.strictEqual(fake.received.length, 0);
   });
 
@@ -617,7 +617,7 @@ describe("express: questions", () => {
       const { account, run } = await asking();
       answer(refusal);
       const res = await request(app(), answerForm(run, { choice: "use:1" }, account));
-      assertBackWith(res, kit.QUESTION_CHANGED);
+      assertBackWith(res, kit.t(kit.QUESTION_CHANGED));
       const after = await reload(run);
       assert.strictEqual(after.question, null);
       assert.strictEqual(after.state, "awaiting_input"); // a changed question leaves the state alone
@@ -629,7 +629,7 @@ describe("express: questions", () => {
     const { account, run } = await asking();
     answer(apiError(422, { code: "invalid", detail: "count must be whole" }));
     let res = await request(app(), answerForm(run, { choice: "add", "data[count]": "1.5" }, account));
-    assertBackWith(res, "QuBe Sync couldn't take that answer: count must be whole");
+    assertBackWith(res, "That answer couldn't be used: count must be whole");
     assert.notStrictEqual((await reload(run)).question, null);
     answer(apiError(500, "boom"));
     res = await request(app(), answerForm(run, { choice: "use:1" }, account));
@@ -836,7 +836,7 @@ describe("express: retry_start", () => {
     reset();
     const { account, run } = await fixtures();
     const res = await request(app(), retry(run, account));
-    assertBackWith(res, kit.NOT_STARTING, `/invoices/${run.recordId}`);
+    assertBackWith(res, kit.t(kit.NOT_STARTING), `/invoices/${run.recordId}`);
     assert.strictEqual(fake.received.length, 0);
   });
 
@@ -897,10 +897,10 @@ describe("express: redeliver", () => {
       answer(data({ run_id: "run-q-1" }));
       assertBackWith(await request(app(), redeliver(run, account)), null);
       await run.update({ question: { token: "t", choices: [] } });
-      assertBackWith(await request(app(), redeliver(run, account)), kit.NOT_QUIET);
+      assertBackWith(await request(app(), redeliver(run, account)), kit.t(kit.NOT_QUIET));
       await run.update({ question: null });
       kit.Run.QUIET_AFTER_SECONDS = 600;
-      assertBackWith(await request(app(), redeliver(run, account)), kit.NOT_QUIET);
+      assertBackWith(await request(app(), redeliver(run, account)), kit.t(kit.NOT_QUIET));
       assert.strictEqual(fake.received.length, 1);
     }));
 
@@ -909,11 +909,11 @@ describe("express: redeliver", () => {
       reset();
       const { account, run } = await stuck();
       answer(apiError(409, { code: "nothing_to_redeliver" }));
-      assertBackWith(await request(app(), redeliver(run, account)), kit.REDELIVERY_REFUSED[409]);
+      assertBackWith(await request(app(), redeliver(run, account)), kit.t(kit.REDELIVERY_REFUSED[409]));
       answer(apiError(429, { code: "rate_limited" }));
-      assertBackWith(await request(app(), redeliver(run, account)), kit.REDELIVERY_REFUSED[429]);
+      assertBackWith(await request(app(), redeliver(run, account)), kit.t(kit.REDELIVERY_REFUSED[429]));
       answer({ destroy: true });
-      assertBackWith(await request(app(), redeliver(run, account)), kit.NO_ANSWER);
+      assertBackWith(await request(app(), redeliver(run, account)), kit.t(kit.NO_ANSWER));
       answer(apiError(500, "boom"));
       assert.strictEqual((await request(app(), redeliver(run, account))).status, 500);
     }));
@@ -945,7 +945,7 @@ describe("express: takeError", () => {
     const cookie = back.headers["set-cookie"][0].split(";")[0];
     assert.match(back.headers["set-cookie"][0], /Path=\/; .*HttpOnly; SameSite=Lax/);
     const shown = await request(page(express()), { path: `/invoices/${run.recordId}`, headers: { cookie } });
-    assert.strictEqual(shown.text, `<p class="qube-error">${kit.escapeHtml(kit.NOT_STARTING)}</p>`);
+    assert.strictEqual(shown.text, `<p class="qube-error" role="alert">${kit.escapeHtml(kit.t(kit.NOT_STARTING))}</p>`);
     assert.match(shown.headers["set-cookie"][0], /^qube_error=; .*Expires=Thu, 01 Jan 1970/);
     const again = await request(page(express()), { path: `/invoices/${run.recordId}` });
     assert.strictEqual(again.text, "");
@@ -969,7 +969,7 @@ describe("express: takeError", () => {
       assert.strictEqual(back.status, 303);
       assert.strictEqual(back.headers["set-cookie"], undefined);
       const shown = await request(made, { path: `/invoices/${run.recordId}` });
-      assert.ok(shown.text.includes(kit.escapeHtml(kit.NOT_STARTING)));
+      assert.ok(shown.text.includes(kit.escapeHtml(kit.t(kit.NOT_STARTING))));
       assert.strictEqual((await request(made, { path: `/invoices/${run.recordId}` })).text, "");
     }
     assert.deepStrictEqual(session, {});
@@ -986,7 +986,7 @@ describe("express: redirectBack", () => {
     assert.strictEqual(back.headers.location, "/invoices/1");
     const cookie = back.headers["set-cookie"][0].split(";")[0];
     const shown = await request(made, { path: "/invoices/1", headers: { cookie } });
-    assert.strictEqual(shown.text, '<p class="qube-error">Connect first.</p>');
+    assert.strictEqual(shown.text, '<p class="qube-error" role="alert">Connect first.</p>');
     made.post("/fine", (req, res) => qube.redirectBack(req, res));
     const fine = await request(made, { method: "POST", path: "/fine", headers: { Referer: "https://elsewhere.example/x" } });
     assert.strictEqual(fine.headers.location, "/");

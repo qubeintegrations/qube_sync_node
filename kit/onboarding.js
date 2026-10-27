@@ -13,6 +13,7 @@ const { APIError } = require("../client");
 const { client, isNoAnswer } = require("./client");
 const { Connection, Run, blank, recordKey } = require("./records");
 const { settings } = require("./settings");
+const { t } = require("./messages");
 
 // The statuses of a connection that has never connected.
 const NEVER_CONNECTED = Object.freeze(["pending", "setup_cancelled"]);
@@ -65,8 +66,9 @@ async function resendOnboarding({ request, id } = {}) {
   return sendToSetup(connection);
 }
 
-const RUNS_GOING = "It has a run or request that hasn't ended: wait for it, or answer its question, first.";
-const DISCONNECT_NO_ANSWER = "QuBe Sync didn't answer: try disconnecting again in a minute.";
+// What the page says when it can't, as message keys (kit/messages.js); the results carry the words.
+const RUNS_GOING = "errors.still_syncing";
+const DISCONNECT_NO_ANSWER = "errors.disconnect_unreachable";
 
 /**
  * DELETE quickbooks/connections/:id: disconnects one of the signed-in account's connections.
@@ -81,12 +83,12 @@ async function disconnectQuickbooks({ request, id } = {}) {
 
   const connection = await Connection.get(String(id));
   if (!connection || !isOwnedBy(connection, account)) return { status: 404 };
-  if (await connection.store.hasWorkGoing(connection.id, { endedStates: Run.ENDED_STATES })) return { status: 303, error: RUNS_GOING };
+  if (await connection.store.hasWorkGoing(connection.id, { endedStates: Run.ENDED_STATES })) return { status: 303, error: t(RUNS_GOING) };
 
   try {
     await deleteOnQube(connection);
   } catch (err) {
-    if (isNoAnswer(err)) return { status: 303, error: DISCONNECT_NO_ANSWER };
+    if (isNoAnswer(err)) return { status: 303, error: t(DISCONNECT_NO_ANSWER) };
     throw err;
   }
   await connection.disconnect();

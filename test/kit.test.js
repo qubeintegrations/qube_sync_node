@@ -521,7 +521,7 @@ describe("kit: a run's events", () => {
     const error = { code: "customer_not_found", message: "Customer not found", detail: "No customer named Riverbend" };
     const after = await runEvent(run, "workflow_run.failed", { revision: 1, error });
     assert.deepStrictEqual(after.error, error);
-    assert.strictEqual(after.summaryText(), "Failed: Customer not found");
+    assert.deepStrictEqual([after.summaryText(), after.reasonText()], ["Couldn't sync", "Customer not found."]);
     assert.strictEqual(after.errorDetail(), "No customer named Riverbend");
   });
 
@@ -531,7 +531,7 @@ describe("kit: a run's events", () => {
     const customer = tables.Customer.add({ name: "Riverbend Electric" });
     const sync = await makeRun(customer, connection, { operation: "sync_customer" });
     const after = await runEvent(sync, "workflow_run.failed", { revision: 1 });
-    assert.deepStrictEqual([after.state, after.summaryText().startsWith("Failed: Five renames")], ["failed", true]);
+    assert.deepStrictEqual([after.state, after.summaryText(), after.reasonText().startsWith("Five renames")], ["failed", "Couldn't sync", true]);
     assert.ok(logged().some((l) => l.level === "warn" && /SyncCustomer 1 \(run \d+\): workflow_run.failed/.test(l.text)));
   });
 
@@ -596,7 +596,7 @@ describe("kit: a run's events", () => {
     assert.ok(after.question.token && after.question.choices && after.question.message);
     assert.deepStrictEqual(Object.keys(after.links), ["decisions", "search"]);
     assert.deepStrictEqual([after.revision, after.state], [6, "awaiting_input"]);
-    assert.strictEqual(after.summaryText(), "Waiting for your answer");
+    assert.strictEqual(after.summaryText(), "Needs your answer");
     after = await runEvent(run, "workflow_run.completed", { revision: 7 });
     assert.strictEqual(after.question, null);
     assert.strictEqual(after.links, null);
@@ -806,7 +806,7 @@ describe("kit: Operation.start", () => {
     await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err instanceof kit.APIError && err.status === 422);
     const run = await kit.Run.latestFor(invoice, "create_invoice");
     assert.strictEqual(run.state, "failed");
-    assert.strictEqual(run.summaryText(), "Failed: it couldn't be started");
+    assert.deepStrictEqual([run.summaryText(), run.reasonText()], ["Couldn't sync", "It couldn't be sent."]);
   });
 
   it("throws RealtimeRequired, with QuBe Sync's detail, and marks the run failed, when the connection is standard", async () => {
@@ -980,18 +980,23 @@ describe("kit: Run", () => {
     reset();
     const { run } = await fixtures();
     const says = async (changes) => (await run.update(changes)).summaryText();
-    assert.strictEqual(await says({ state: "starting" }), "Starting");
-    assert.strictEqual(await says({ state: "running" }), "Running");
-    assert.strictEqual(await says({ state: "awaiting_input" }), "Waiting for your answer");
+    assert.strictEqual(await says({ state: "starting" }), "Sending to QuickBooks");
+    assert.strictEqual(await says({ state: "running" }), "Syncing with QuickBooks");
+    assert.strictEqual(await says({ state: "awaiting_input" }), "Needs your answer");
     assert.strictEqual(await says({ state: "completed", outcome: "added" }), "Added to QuickBooks");
     assert.strictEqual(await says({ state: "completed", outcome: null }), "Done");
     assert.strictEqual(await says({ state: "completed", outcome: "completed" }), "Done");
     assert.strictEqual(await says({ state: "completed", outcome: "used_existing" }), "Done: Used existing");
-    assert.strictEqual(await says({ state: "failed", outcome: "failed", error: "Name taken", endedAt: new Date() }), "Failed: Name taken");
-    assert.strictEqual(await says({ state: "failed", outcome: "failed", error: null, endedAt: new Date() }), "Failed");
-    assert.strictEqual(await says({ state: "failed", outcome: "duplicate_found", error: null, endedAt: new Date() }), "Failed: Duplicate found");
-    assert.strictEqual(await says({ state: "cancelled", cancelReason: "Merged" }), "Cancelled: Merged");
-    assert.strictEqual(await says({ state: "cancelled", cancelReason: " " }), "Cancelled: your app chose to stop");
+    assert.strictEqual(await says({ state: "failed", outcome: "failed", error: "Name taken", endedAt: new Date() }), "Couldn't sync");
+    assert.strictEqual(run.reasonText(), "Name taken.");
+    assert.strictEqual(await says({ state: "failed", outcome: "failed", error: null, endedAt: new Date() }), "Couldn't sync");
+    assert.strictEqual(run.reasonText(), null);
+    assert.strictEqual(await says({ state: "failed", outcome: "duplicate_found", error: null, endedAt: new Date() }), "Couldn't sync");
+    assert.strictEqual(run.reasonText(), "Duplicate found.");
+    assert.strictEqual(await says({ state: "cancelled", cancelReason: "Merged" }), "Cancelled");
+    assert.strictEqual(run.reasonText(), "Merged.");
+    assert.strictEqual(await says({ state: "cancelled", cancelReason: " " }), "Cancelled");
+    assert.deepStrictEqual([run.reasonText(), run.cancelReasonText()], [null, "it was stopped before it finished"]);
   });
 
   it("reads a completed run whose outcome is cancelled as cancelled, not done", async () => {
@@ -1000,7 +1005,7 @@ describe("kit: Run", () => {
     await run.update({ state: "completed", outcome: "cancelled" });
     assert.strictEqual(run.cancelled(), true);
     assert.strictEqual(run.ended(), true);
-    assert.strictEqual(run.summaryText(), "Cancelled: your app chose to stop");
+    assert.strictEqual(run.summaryText(), "Cancelled");
   });
 
   it("says a start QuBe Sync hasn't confirmed for a minute is unconfirmed, and a younger one is starting", async () => {
@@ -1010,7 +1015,7 @@ describe("kit: Run", () => {
     assert.strictEqual(run.unconfirmed(), false);
     const later = new Date(Date.now() + 61 * 1000);
     assert.strictEqual(run.unconfirmed(later), true);
-    assert.strictEqual(run.summaryText(later), "Not confirmed by QuBe Sync yet");
+    assert.strictEqual(run.summaryText(later), "Still waiting for QuickBooks");
   });
 
   it("looks stuck when confirmed, not ended, quiet for 10 minutes, and running or awaiting a question it never got", async () => {
@@ -1203,8 +1208,8 @@ describe("kit: answers", () => {
   });
 
   it("refusalMessage reads errors.detail", () => {
-    assert.strictEqual(kit.refusalMessage(new kit.APIError(422, JSON.stringify({ errors: { detail: "count must be whole" } }))), "QuBe Sync couldn't take that answer: count must be whole");
-    assert.strictEqual(kit.refusalMessage(new kit.APIError(422, "<html>")), "QuBe Sync couldn't take that answer.");
+    assert.strictEqual(kit.refusalMessage(new kit.APIError(422, JSON.stringify({ errors: { detail: "count must be whole" } }))), "That answer couldn't be used: count must be whole");
+    assert.strictEqual(kit.refusalMessage(new kit.APIError(422, "<html>")), "That answer couldn't be used. Check it and try again.");
   });
 });
 
@@ -1216,7 +1221,7 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     message: `Which <b>"customer"</b>?`,
     details: [{ label: "Name & co", value: "<script>x</script>" }],
     choices: [
-      { id: "pick", label: "Pick 'one'", detail: "a > b", description: "desc", fields: [{ name: "customer", type: "record", label: "Customer", required: true }] },
+      { id: "pick", label: "Pick 'one'", detail: "a > b", description: "desc", fields: [{ name: "customer", type: "record", label: "Customer", required: true, kind: "customer" }] },
       { id: "skip", label: "Skip", fields: [{ name: "why", type: "string" }, { name: "n", type: "number" }, { name: "b", type: "boolean" }] },
     ],
   };
@@ -1228,33 +1233,36 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     const html = kit.renderQuestion(run, { mount: "/app/", csrfToken: `c"t`, nonce: "n<1" });
     const action = `/app/qube/questions/runs/${run.id}`;
     assert.ok(!html.includes("<b>"));
-    assert.ok(!html.includes("<script>x"));
+    assert.ok(!html.includes("<script"));
+    assert.ok(html.includes(`<section class="qube-question" data-qube-question="tok">`));
     assert.ok(html.includes("Which &lt;b&gt;&quot;customer&quot;&lt;/b&gt;?"));
     assert.ok(html.includes(`<th scope="row">Name &amp; co</th><td>&lt;script&gt;x&lt;/script&gt;</td>`));
-    assert.strictEqual(html.split(`<form class="qube-choice" method="post" action="${action}">`).length - 1, 2);
+    assert.strictEqual(html.split(`method="post" action="${action}"`).length - 1, 2);
     assert.strictEqual(html.match(/<input type="hidden" name="_csrf" value="c&quot;t">/g).length, 2);
     assert.ok(html.includes(`data-qube-search="${action}/search" data-qube-field="customer"`));
-    assert.ok(html.includes(`<script nonce="n&lt;1">`));
-    assert.ok(html.includes(kit.SEARCH_SCRIPT));
     assert.ok(html.includes(`Pick &#39;one&#39; <span class="qube-choice-detail">a &gt; b</span>`));
-    assert.ok(html.includes(`<input type="text" id="qube-tok-1-why" name="data[why]">`));
-    assert.ok(html.includes(`<input type="number" step="any" id="qube-tok-1-n" name="data[n]">`));
-    assert.ok(html.includes(`<input type="checkbox" id="qube-tok-1-b" name="data[b]" value="true">`));
+    assert.ok(html.includes(`<input type="text" name="data[why]" id="qube-tok-1-why" class="qube-input">`));
+    assert.ok(html.includes(`<input type="number" name="data[n]" id="qube-tok-1-n" step="any" class="qube-input">`));
+    assert.ok(html.includes(`<input type="checkbox" name="data[b]" id="qube-tok-1-b" value="true" class="qube-checkbox">`));
+    assert.ok(html.includes(`<input type="hidden" name="data[customer]" class="qube-search-value" data-qube-search-value="">`));
+    // Two forms: the first the one primary button, the second "or" after it.
+    assert.deepStrictEqual([...html.matchAll(/data-qube-button="(\w+)"/g)].map((m) => m[1]), ["primary", "secondary"]);
+    assert.ok(html.includes(`<div class="qube-choice-divider" role="separator"><span>or</span></div>`));
   });
 
-  it("shows a fixed list (enum) as a select, and sends no script without a search", async () => {
+  it("shows a fixed list (enum) as a select, with no inline script", async () => {
     reset();
     const { run } = await fixtures();
     const choices = [{ id: "go", label: "Go", fields: [{ name: "kind", type: "string", required: true, enum: [{ value: "a", label: "A <1>" }, { value: "b" }] }] }];
     await run.update({ question: { token: "tok", message: "Which?", choices } });
     const html = kit.renderQuestion(run);
-    const select = `<select id="qube-tok-0-kind" name="data[kind]" required><option value=""></option><option value="a">A &lt;1&gt;</option><option value="b">b</option></select>`;
+    const select = `<select name="data[kind]" id="qube-tok-0-kind" required class="qube-select"><option value=""></option><option value="a">A &lt;1&gt;</option><option value="b">b</option></select>`;
     assert.ok(html.includes(select));
     assert.ok(!html.includes("<script"));
   });
 
   describe("a rows field", () => {
-    const items = [{ value: "item_service", label: "Service" }, { value: "item_inventory", label: "Inventory part" }, { value: "item_non_inventory", label: "Non-inventory part" }];
+    const items = [{ value: "item_service", label: "Service" }, { value: "item_inventory", label: "Inventory part" }, { value: "item_non_inventory", label: "Non-inventory part" }, { value: "item_other_charge", label: "Other charge" }];
     const rowsQuestion = {
       token: "tok",
       message: "QuickBooks doesn't have these records the transaction names.",
@@ -1273,12 +1281,11 @@ describe("kit: renderQuestion and renderRunStatus", () => {
                 { name: "list_id", type: "record", required: true, label: "Record to use", kind: null, when: { action: ["use"] } },
                 { name: "item_type", type: "string", required: true, label: "Item type", enum: items, when: { action: ["create"] } },
                 { name: "income_account", type: "record", required: true, label: "Income account", kind: "account", when: { action: ["create"] } },
-                { name: "asset_account", type: "record", required: true, label: "Asset account", kind: "account", when: { action: ["create"], item_type: ["item_inventory"] } },
                 { name: "memo", type: "string", label: "Memo" },
               ],
               rows: [
                 { key: "customer_ref", label: "Lone Star Supply", detail: "Customer", columns: ["action", "list_id"], values: {} },
-                { key: "invoice_line_add.0.item_ref", label: "Vinyl Banner", detail: "Item", columns: ["action", "list_id", "item_type", "income_account", "asset_account", "memo"], values: {} },
+                { key: "invoice_line_add.0.item_ref", label: "Vinyl Banner", detail: "Item", columns: ["action", "list_id", "item_type", "income_account", "memo"], values: {} },
                 { key: "invoice_line_add.1.item_ref", label: "Hardware Kit", detail: "Item", columns: ["action", "list_id", "income_account"], values: { item_type: "item_non_inventory" } },
               ],
             },
@@ -1288,40 +1295,33 @@ describe("kit: renderQuestion and renderRunStatus", () => {
       ],
     };
 
-    it("shows a table: a row per record, the columns it asks, a search per record column with its row, and a bulk bar", async () => {
+    it("shows a block per record: a segmented choice, the fields it asks (hidden until their when holds), and Set all to", async () => {
       reset();
       const { run } = await fixtures();
       await run.update({ question: rowsQuestion, links: { decisions: "d", search: "s" } });
-      const html = kit.renderQuestion(run, { nonce: "n1" });
+      const html = kit.renderQuestion(run);
       const search = `/qube/questions/runs/${run.id}/search`;
-      assert.ok(html.includes(`<div class="qube-field qube-rows" data-qube-rows>`));
-      assert.ok(html.includes(`<th><input type="checkbox" class="qube-rows-all" aria-label="Select all"></th>`));
-      const rowKeys = [...html.matchAll(/<tr data-qube-row="([^"]+)"/g)].map((m) => m[1]);
+      assert.ok(!html.includes("<table class=\"qube-rows"));
+      assert.ok(html.includes(`data-qube-rows data-qube-text-use-for-all="Use for all %{count}"`));
+      const rowKeys = [...html.matchAll(/role="listitem" aria-labelledby="[^"]+" data-qube-row="([^"]+)"/g)].map((m) => m[1]);
       assert.deepStrictEqual(rowKeys, ["customer_ref", "invoice_line_add.0.item_ref", "invoice_line_add.1.item_ref"]);
-      assert.ok(html.includes(`<th scope="row">Lone Star Supply <span class="qube-rows-detail">Customer</span></th>`));
-      // The customer row asks action and list_id only.
-      assert.ok(html.includes(`<select name="data[records][customer_ref][action]" class="qube-rows-input" aria-label="What to do" required><option value=""></option><option value="create">Create it</option><option value="use">Use one</option></select>`));
+      assert.ok(html.includes(`<span class="qube-row-label">Lone Star Supply</span><span class="qube-row-detail">Customer</span>`));
+      // action: two options, so radios posted per row; required while shown.
+      assert.ok(html.includes(`<input type="radio" name="data[records][customer_ref][action]" value="create" required class="qube-segment-input qube-rows-input" data-qube-rows-input="">`));
       assert.ok(!html.includes(`name="data[records][customer_ref][item_type]"`));
-      assert.ok(html.includes(`<div class="qube-search" data-qube-search="${search}" data-qube-field="records.list_id" data-qube-row="customer_ref">`));
-      assert.ok(html.includes(`<input type="hidden" class="qube-search-value qube-rows-input" name="data[records][customer_ref][list_id]">`));
-      assert.ok(html.includes(`<input type="text" name="data[records][invoice_line_add.0.item_ref][memo]" class="qube-rows-input" aria-label="Memo">`));
-      assert.ok(html.includes(`<td data-qube-col="asset_account" data-qube-when="${kit.escapeHtml(JSON.stringify({ action: ["create"], item_type: ["item_inventory"] }))}">`));
-      // A preset value shows as its enum label.
+      // list_id waits for action "use": hidden, disabled and not required in the markup.
+      assert.ok(html.includes(`<div class="qube-row-cell" hidden data-qube-col="list_id" data-qube-when="${kit.escapeHtml(JSON.stringify({ action: ["use"] }))}" data-qube-hidden="" data-qube-required="">`));
+      assert.ok(html.includes(`data-qube-search="${search}" data-qube-field="records.list_id" data-qube-row="customer_ref"`));
+      assert.ok(html.includes(`<input type="hidden" name="data[records][customer_ref][list_id]" disabled class="qube-search-value qube-rows-input" data-qube-rows-input="" data-qube-search-value="">`));
+      assert.ok(html.includes(`<input type="text" name="data[records][invoice_line_add.0.item_ref][memo]" id="qube-data-records-1-memo" class="qube-input qube-rows-input" data-qube-rows-input="">`));
+      // item_type: four options, so a select; a preset value shows as its label.
+      assert.ok(html.includes(`<select name="data[records][invoice_line_add.0.item_ref][item_type]" id="qube-data-records-1-item_type" disabled class="qube-select qube-rows-input" data-qube-rows-input="">`));
       assert.ok(html.includes(`data-qube-values="${kit.escapeHtml(JSON.stringify({ item_type: "item_non_inventory" }))}"`));
-      assert.ok(/<td data-qube-col="item_type"[^>]*>\s*Non-inventory part\s*<\/td>/.test(html));
-      // Set selected: a select per enum column and a search per record column with a fixed kind, never posted.
-      const bulk = (col) => html.split(`<td data-qube-bulk="${col}">`)[1].split("</td>")[0];
-      assert.ok(bulk("income_account").includes(`<div class="qube-search" data-qube-search="${search}" data-qube-field="records.income_account">`));
-      assert.ok(bulk("income_account").includes(`<input type="hidden" class="qube-search-value qube-bulk-value" form="">`));
-      assert.ok(bulk("income_account").includes(`<button type="button" class="qube-bulk-apply">Apply</button>`));
-      assert.ok(bulk("item_type").includes(`<select class="qube-bulk-value" form=""><option value=""></option>`));
-      assert.ok(!bulk("list_id").includes("qube-bulk-apply"));
-      assert.ok(!bulk("memo").includes("qube-bulk-apply"));
-      // Each script once, with the nonce.
-      assert.strictEqual(html.split(kit.SEARCH_SCRIPT).length - 1, 1);
-      assert.strictEqual(html.split(kit.ROWS_SCRIPT).length - 1, 1);
-      assert.ok(html.includes(`<script nonce="n1">${kit.ROWS_SCRIPT}</script>`));
-      assert.ok(kit.SEARCH_SCRIPT.includes(`"&row=" + encodeURIComponent(row)`));
+      assert.ok(html.includes(`<span class="qube-row-preset-value">Non-inventory part</span>`));
+      assert.ok(html.includes(`<div class="qube-rows-set-all" data-qube-rows-set-all="action">`));
+      assert.ok(html.includes(`<button type="button" class="qube-set-all-button" data-qube-set-all="use">Use one</button>`));
+      assert.ok(html.includes(`<button type="button" class="qube-use-for-all" data-qube-use-for-all hidden></button>`));
+      assert.ok(!html.includes("<script"));
     });
   });
 
@@ -1335,16 +1335,18 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     assert.ok(kit.renderQuestion(run, { csrfToken: "t", csrfField: "authenticity_token" }).includes(`name="authenticity_token" value="t"`));
   });
 
-  it("shows the run's summary, and a failure's detail, escaped", async () => {
+  it("shows the pill's few words, then why and a failure's detail, escaped", async () => {
     reset();
     const { run } = await fixtures();
-    await run.update({ state: "failed", outcome: "failed", endedAt: new Date(), error: { message: "Customer <missing>", detail: "No customer named Riverbend" } });
+    await run.update({ state: "failed", outcome: "failed", endedAt: new Date(), error: { message: "customer <missing>", detail: "No customer named Riverbend" } });
     const html = kit.renderRunStatus(run);
     assert.ok(html.startsWith(`<div class="qube-run-status qube-sync-failed qube-run-failed" data-qube-sync-status="failed">`));
-    assert.ok(html.includes(`<p class="qube-run-summary">Failed: Customer &lt;missing&gt;</p>`));
+    assert.ok(html.includes(`<p class="qube-run-summary">Couldn&#39;t sync</p>`));
+    assert.ok(html.includes(`<p class="qube-run-reason">Customer &lt;missing&gt;.</p>`));
     assert.ok(html.includes(`<p class="qube-run-error-detail">No customer named Riverbend</p>`));
-    await run.update({ state: "completed", outcome: "cancelled", error: null });
+    await run.update({ state: "completed", outcome: "cancelled", error: null, cancelReason: "Merged" });
     assert.ok(kit.renderRunStatus(run).includes(`qube-run-cancelled`));
+    assert.ok(kit.renderRunStatus(run).includes(`<p class="qube-run-reason">Merged.</p>`));
     assert.ok(!kit.renderRunStatus(run).includes("qube-run-error-detail"));
     assert.strictEqual(kit.renderRunStatus(null), "");
   });
@@ -1363,25 +1365,38 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     assert.ok(kit.renderQuestion(asking).includes(`<p class="qube-question-message">Which?</p>`));
   });
 
-  it("offers to send a stuck run's latest news again, and only then", async () => {
+  it("offers to check for updates on a stuck run, and only then", async () => {
     reset();
     const { run } = await fixtures();
     await run.update({ qubeRunId: "run-q-1" });
     assert.ok(!kit.renderRunStatus(run).includes("redeliver"));
     const later = new Date(Date.now() + 601 * 1000);
     const html = kit.renderRunStatus(run, { now: later, csrfToken: "t", mount: "/app" });
-    assert.ok(html.includes(`<p class="qube-run-quiet">No news from QuBe Sync about it for a while.</p>`));
+    assert.ok(html.includes(`<p class="qube-run-quiet">No update from QuickBooks for a while.</p>`));
     assert.ok(html.includes(`<form class="qube-redeliver-form" method="post" action="/app/qube/runs/${run.id}/redeliver">`));
-    assert.ok(html.includes(`<button type="submit" class="qube-redeliver">Send its latest news again</button>`));
+    assert.ok(html.includes(`<button type="submit" class="qube-redeliver">Check for updates</button>`));
     assert.ok(html.includes(`<input type="hidden" name="_csrf" value="t">`));
+  });
+
+  it("says why a run waits on a stalled connection, with no redelivery", async () => {
+    reset();
+    const { connection, run } = await fixtures();
+    await run.update({ qubeRunId: "run-q-1" });
+    await connection.update({ status: "stalled", stallReason: "quickbooks_unavailable" });
+    const later = new Date(Date.now() + 601 * 1000);
+    const html = kit.renderRunStatus(await reload(run), { now: later });
+    assert.ok(html.startsWith(`<div class="qube-run-status qube-sync-sending qube-run-running qube-connection-stalled" data-qube-sync-status="sending" data-qube-stall="quickbooks_unavailable">`));
+    assert.ok(html.includes(`<p class="qube-run-summary">Waiting for QuickBooks</p>`));
+    assert.ok(html.includes(`<p class="qube-run-stall">The Web Connector is checking in but can&#39;t open QuickBooks.`));
+    assert.ok(!html.includes("redeliver"));
   });
 
   it("shows an error once, escaped, above whatever else it shows", async () => {
     reset();
     const { run } = await fixtures();
-    assert.strictEqual(kit.renderRunStatus(null, { error: "<b>no</b>" }), `<p class="qube-error">&lt;b&gt;no&lt;/b&gt;</p>`);
-    assert.ok(kit.renderRunStatus(run, { error: "Changed" }).startsWith(`<p class="qube-error">Changed</p>\n<div class="qube-run-status`));
-    assert.strictEqual(kit.renderQuestion(run, { error: "Changed" }), `<p class="qube-error">Changed</p>`);
+    assert.strictEqual(kit.renderRunStatus(null, { error: "<b>no</b>" }), `<p class="qube-error" role="alert">&lt;b&gt;no&lt;/b&gt;</p>`);
+    assert.ok(kit.renderRunStatus(run, { error: "Changed" }).startsWith(`<p class="qube-error" role="alert">Changed</p>\n<div class="qube-run-status`));
+    assert.strictEqual(kit.renderQuestion(run, { error: "Changed" }), `<p class="qube-error" role="alert">Changed</p>`);
     assert.strictEqual(kit.renderRunStatus(run, { error: null }).includes("qube-error"), false);
   });
 
@@ -1394,7 +1409,8 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     const html = kit.renderRunStatus(run, { now: later, csrfToken: "t", mount: "/app" });
     assert.ok(html.includes(`<form class="qube-retry-start-form" method="post" action="/app/qube/runs/${run.id}/retry_start">`));
     assert.ok(html.includes(`<input type="hidden" name="_csrf" value="t">`));
-    assert.ok(html.includes(`Not confirmed by QuBe Sync yet`));
+    assert.ok(html.includes(`<p class="qube-run-summary">Still waiting for QuickBooks</p>`));
+    assert.ok(html.includes(`<button type="submit" class="qube-retry-start">Try sending again</button>`));
   });
 });
 
@@ -1424,7 +1440,7 @@ describe("kit: sync status", () => {
     }
     await run.update({ state: "starting" });
     const later = await connection.syncStatus(invoice, "create_invoice", { now: new Date(Date.now() + 61 * 1000) });
-    assert.deepStrictEqual([later.status, later.unconfirmed, later.summaryText], ["sending", true, "Not confirmed by QuBe Sync yet"]);
+    assert.deepStrictEqual([later.status, later.unconfirmed, later.summaryText], ["sending", true, "Still waiting for QuickBooks"]);
   });
 
   it("says failed or cancelled after the link, with retry only when there's no link", async () => {
@@ -1432,7 +1448,7 @@ describe("kit: sync status", () => {
     const { connection, invoice, run } = await fixtures();
     await run.update({ state: "failed", endedAt: new Date(), error: { message: "Customer not found" } });
     let found = await status(connection, invoice);
-    assert.deepStrictEqual([found.status, found.retry, found.error, found.summaryText], ["failed", true, { message: "Customer not found" }, "Failed: Customer not found"]);
+    assert.deepStrictEqual([found.status, found.retry, found.error, found.summaryText], ["failed", true, { message: "Customer not found" }, "Couldn't sync"]);
     await run.update({ state: "cancelled", cancelReason: "asked" });
     found = await status(connection, invoice);
     assert.deepStrictEqual([found.status, found.retry, found.error], ["cancelled", true, null]);

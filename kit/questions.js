@@ -17,17 +17,14 @@ const { APIError } = require("../client");
 const { client, isNoAnswer } = require("./client");
 const { Run } = require("./records");
 const { settings } = require("./settings");
+const { t } = require("./messages");
 
-const QUESTION_CHANGED =
-  "This question changed since the page showed it, so that answer was not sent: " +
-  "the page now shows where it stands.";
-const NOT_STARTING = "This run isn't waiting for its start to be confirmed.";
-const NOT_QUIET = "QuBe Sync has been heard from about this run lately: nothing to ask for.";
-const REDELIVERY_REFUSED = Object.freeze({
-  409: "QuBe Sync has no news about this run to send yet.",
-  429: "That was asked a moment ago: give it a minute.",
-});
-const NO_ANSWER = "QuBe Sync didn't answer: try again in a minute.";
+// What the page says when it can't, as message keys (kit/messages.js); the results carry the words.
+const QUESTION_CHANGED = "errors.question_changed";
+const NOT_STARTING = "errors.not_starting";
+const NOT_QUIET = "errors.not_quiet";
+const REDELIVERY_REFUSED = Object.freeze({ 409: "errors.no_update_yet", 429: "errors.checked_just_now" });
+const NO_ANSWER = "errors.unreachable";
 const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100, maxRow: 200 });
 
 // The run a request names, with its operation and its record, once authorizeQuestion says true,
@@ -140,7 +137,7 @@ async function retryStart({ runId, request }) {
 
 /**
  * Asks QuBe Sync to send a stuck run's latest event (Run#looksStuck) again, to the run's webhook
- * URL: renderRunStatus's "Send its latest news again". Resolves to { status: 303 }, { status: 303,
+ * URL: renderRunStatus's "Check for updates". Resolves to { status: 303 }, { status: 303,
  * error } (not stuck: NOT_QUIET; refused: REDELIVERY_REFUSED[409 or 429]; no answer: NO_ANSWER),
  * or { status: 404, message }.
  */
@@ -160,9 +157,9 @@ async function redeliver({ runId, request }) {
   return { status: 303 };
 }
 
-// Back to the page, with a message for it to show once.
+// Back to the page, with a message for it to show once: a key's words, or the words themselves.
 function back(error) {
-  return { status: 303, error };
+  return { status: 303, error: error.startsWith("errors.") ? t(error) : error };
 }
 
 /**
@@ -227,8 +224,8 @@ function number(text) {
 function refusalMessage(err) {
   const errors = err && err.errors;
   const detail = errors && typeof errors === "object" && !Array.isArray(errors) ? errors.detail : null;
-  if (detail) return `QuBe Sync couldn't take that answer: ${detail}`;
-  return "QuBe Sync couldn't take that answer.";
+  if (detail) return t("errors.answer_refused_with", { detail });
+  return t("errors.answer_refused");
 }
 
 module.exports = {

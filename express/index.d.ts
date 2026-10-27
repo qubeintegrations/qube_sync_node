@@ -28,10 +28,26 @@ export declare function connect(options?: SettingsOptions | Settings): Router;
 
 /**
  * POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start and POST /qube/runs/:id/redeliver: 404
- * when authorizeQuestion refuses; what can't go through redirects back with a message for takeError. Mount it behind
- * your sign-in and CSRF protection.
+ * when authorizeQuestion refuses; what can't go through redirects back with a message for takeError. Also serves the
+ * behaviour script and stylesheet (GET /qube/assets/question.js, /qube/assets/qubesync.css). Mount it behind your
+ * sign-in and CSRF protection.
  */
 export declare function questions(options?: RouterOptions<QuestionsOptions> | Settings): Router;
+
+export interface StoryboardOptions {
+  /** Your page around the storyboard's body; assets is renderAssets({ stylesheet: true }) for its <head>. */
+  layout?: (body: string, page: { title: string; req: Request; assets: string }) => string;
+  /** Your CSRF token for its forms (they post to a no-op). */
+  csrfToken?: (req: Request) => string | null;
+  /** The token's form field. Default "_csrf". */
+  csrfField?: string;
+}
+
+/**
+ * GET /qube/storyboard and /qube/storyboard/:screen: every screen with sample data, while the storyboard setting is true
+ * (by default when NODE_ENV is "development"; 404 otherwise). Searches answer from the samples; forms post to a no-op.
+ */
+export declare function storyboard(options?: RouterOptions<StoryboardOptions> | Settings): Router;
 
 /**
  * The message a route sent the user back with (kept in req.flash, the session, or a cookie), or null. Taken once: pass

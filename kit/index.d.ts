@@ -417,6 +417,14 @@ export interface SettingsOptions<Request = any> {
   pruneRunsAfter?: number | null;
   /** The type onboarding creates connections as. Workflows run only on realtime ones. Default "realtime". */
   connectionType?: "realtime" | "standard" | null;
+  /** Your words for the screens and routes, by key (MESSAGE_KEYS), nested or dotted. An unknown key throws. */
+  messages?: Messages | null;
+  /** Your CSS framework's classes by piece (UI_PIECES), beside the qube- ones. An unknown piece throws. */
+  uiClasses?: UiClasses | null;
+  /** Your own pieces by name (PIECE_NAMES), in place of the kit's. */
+  pieces?: Pieces | null;
+  /** Whether the storyboard router shows its screens. Default: NODE_ENV is "development". */
+  storyboard?: boolean | null;
   /** Default: QUBE_API_KEY. Never logged or shown. */
   apiKey?: string | null;
   /** Default: QUBE_URL, else https://qubesync.com. */
@@ -440,6 +448,11 @@ export declare class Settings {
   readonly jobAttempts: number;
   readonly pruneRunsAfter: number | null;
   readonly connectionType: "realtime" | "standard";
+  /** Flat, by dotted key. */
+  readonly messages: Readonly<Record<string, string>>;
+  readonly uiClasses: Readonly<Partial<Record<UiPiece, string>>>;
+  readonly pieces: Readonly<Pieces>;
+  readonly storyboard: boolean;
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly webhookSecret: string | readonly string[];
@@ -625,10 +638,12 @@ export declare class Run implements RunRow {
   unconfirmed(now?: Date): boolean;
   /** Confirmed, not ended, quiet for 10 minutes, and running or awaiting a question this app never received. */
   looksStuck(now?: Date): boolean;
-  /** "Added to QuickBooks", "Done", "Failed: <message>", "Cancelled: <reason>", "Waiting for your answer", "Starting", "Not confirmed by QuBe Sync yet" or "Running". */
-  summaryText(now?: Date): string;
-  cancelReasonText(): string;
-  errorMessage(): string | null;
+  /** "Added to QuickBooks", "Done", "Couldn't sync", "Cancelled", "Needs your answer", "Sending to QuickBooks", "Still waiting for QuickBooks" or "Syncing with QuickBooks" (the messages setting's words, then messages'). */
+  summaryText(now?: Date, messages?: Readonly<Record<string, string>>): string;
+  /** Why it failed or was cancelled, as a sentence, or null. */
+  reasonText(messages?: Readonly<Record<string, string>>): string | null;
+  cancelReasonText(messages?: Readonly<Record<string, string>>): string;
+  errorMessage(messages?: Readonly<Record<string, string>>): string | null;
   errorDetail(): string | null;
   openQuestion(): QubePrompt | null;
 }
@@ -888,18 +903,19 @@ export declare function connectQuickbooks(input: {
 export declare function resendOnboarding(input: { request: any; id: RowId }): Promise<Redirect | { status: 401 | 404 }>;
 /** DELETE quickbooks/connections/:id: QuBe Sync's connection, then the row with everything kept against it. */
 export declare function disconnectQuickbooks(input: { request: any; id: RowId }): Promise<BackToPage | { status: 401 | 404 }>;
-/** disconnectQuickbooks's message while a run or request hasn't ended. */
+// The routes' messages, as message keys: t(KEY) is the words a result's error carries.
+/** disconnectQuickbooks's message key while a run or request hasn't ended. */
 export declare const RUNS_GOING: string;
-/** disconnectQuickbooks's message when QuBe Sync didn't answer. */
+/** disconnectQuickbooks's message key when QuBe Sync didn't answer. */
 export declare const DISCONNECT_NO_ANSWER: string;
 
 export declare const QUESTION_CHANGED: string;
 export declare const NOT_STARTING: string;
-/** redeliver's message for a run that doesn't look stuck. */
+/** redeliver's message key for a run that doesn't look stuck. */
 export declare const NOT_QUIET: string;
-/** redeliver's messages for QuBe Sync's 409 (nothing to send yet) and 429 (asked too soon). */
+/** redeliver's message keys for QuBe Sync's 409 (nothing to send yet) and 429 (asked too soon). */
 export declare const REDELIVERY_REFUSED: Readonly<{ 409: string; 429: string }>;
-/** redeliver's message when QuBe Sync didn't answer. */
+/** redeliver's message key when QuBe Sync didn't answer. */
 export declare const NO_ANSWER: string;
 export declare const SEARCH_LIMITS: { readonly minQuery: number; readonly maxQuery: number; readonly maxField: number; readonly maxRow: number };
 
@@ -932,6 +948,202 @@ export declare function refusalMessage(err: APIError): string;
 // ---------------------------------------------------------------------------
 // HTML
 
+/** Words by key: nested ({ status: { running: "..." } }) or dotted ({ "status.running": "..." }). */
+export interface Messages {
+  [key: string]: string | Messages;
+}
+
+export type UiPiece =
+  | "question" | "message" | "details" | "choice" | "choice_detail" | "choice_description" | "field" | "label" | "input" | "select" | "checkbox"
+  | "button" | "button_secondary" | "search" | "search_results" | "search_result" | "status" | "summary" | "detail" | "error"
+  | "rows" | "row" | "row_header" | "segmented" | "segment" | "row_fields" | "use_for_all" | "stall"
+  | "picks" | "pick" | "pick_detail" | "pick_action" | "reason" | "button_ghost" | "choice_footer" | "choice_divider";
+
+export type UiClasses = Partial<Record<UiPiece, string | readonly string[]>>;
+
+export type PieceName =
+  | "question" | "message" | "details" | "picks" | "pick" | "choice" | "footer" | "field"
+  | "fields/text" | "fields/number" | "fields/boolean" | "fields/select" | "fields/search" | "fields/rows"
+  | "rows/row" | "rows/cell" | "rows/segmented"
+  | "run_status/status" | "run_status/summary" | "run_status/detail" | "run_status/stall" | "run_status/retry" | "run_status/redeliver"
+  | "error";
+
+/** What a piece is given beside its view-model. */
+export interface PieceContext {
+  /** Another piece (yours where you've replaced it), with locals for it. */
+  render(name: PieceName, view: any, locals?: Record<string, unknown>): string;
+  /** The base classes, then your uiClasses' for piece. */
+  classes(piece: UiPiece, ...base: Array<string | null | undefined>): string;
+  /** The words for a message key. */
+  t(key: string, vars?: Record<string, unknown>): string;
+  escape(value: unknown): string;
+  /** Attributes from an object: null, undefined and false left out, true bare. */
+  attrs(map: Record<string, unknown>): string;
+  /** Your CSRF token's hidden input, or "". */
+  csrf: string;
+  messages: Readonly<Record<string, string>>;
+  /** pick, choice and footer: the question. */
+  question?: QuestionView;
+  /** rows/row: its RowsView. */
+  rows?: RowsView;
+  /** field: the control's HTML. */
+  control?: string;
+  [local: string]: unknown;
+}
+
+export type Piece = (view: any, ctx: PieceContext) => string;
+export type Pieces = Partial<Record<PieceName, Piece>>;
+
+export declare const PIECES: Readonly<Record<PieceName, Piece>>;
+export declare const PIECE_NAMES: readonly PieceName[];
+export declare const UI_PIECES: readonly UiPiece[];
+/** The English words, nested by key. */
+export declare const MESSAGES: Readonly<Messages>;
+/** Every message key, dotted. */
+export declare const MESSAGE_KEYS: readonly string[];
+/** The words for key: extra's (flat), the messages setting's, else English; %{name} from vars. */
+export declare function t(key: string, vars?: Record<string, unknown> | null, extra?: Readonly<Record<string, string>>): string;
+/** A renderer with a render's own pieces, uiClasses and messages over the settings'. */
+export declare function renderer(options?: { pieces?: Pieces; uiClasses?: UiClasses; messages?: Messages; csrfToken?: string | null; csrfField?: string }): {
+  render(name: PieceName, view: any, locals?: Record<string, unknown>): string;
+  ctx: PieceContext;
+};
+
+export interface Urls {
+  question(run: Run): string;
+  retryStart(run: Run): string;
+  redeliver(run: Run): string;
+}
+/** The kit's routes under mount (where the questions router is mounted). */
+export declare function routes(mount?: string): Urls;
+
+export interface DetailView {
+  label: unknown;
+  value: unknown;
+}
+export interface OptionView {
+  value: unknown;
+  label: string;
+}
+
+export declare class QuestionView {
+  static fromRun(run: Run | null | undefined, options?: { urls?: Urls; error?: string | null }): QuestionView | null;
+  constructor(prompt: QubePrompt, options: { actionUrl: string; searchUrl: string; error?: string | null });
+  readonly prompt: QubePrompt;
+  readonly message: string;
+  readonly token: string;
+  readonly details: DetailView[];
+  readonly choices: ChoiceView[];
+  readonly actionUrl: string;
+  readonly searchUrl: string;
+  /** A refusal to show above it, or null. */
+  readonly error: string | null;
+  readonly picks: ChoiceView[];
+  readonly forms: ChoiceView[];
+  readonly exits: ChoiceView[];
+  /** Neither picks nor forms: one row, the first choice primary. */
+  readonly plain: boolean;
+}
+
+export declare class ChoiceView {
+  readonly id: string;
+  readonly label: string;
+  readonly detail: string | null;
+  readonly description: string | null;
+  readonly index: number;
+  readonly actionUrl: string;
+  readonly fields: FieldView[];
+  readonly kind: "pick" | "form" | "exit";
+  readonly style: "primary" | "secondary" | "ghost" | null;
+  /** cancel. */
+  readonly secondary: boolean;
+  readonly buttonPiece: "button" | "button_secondary" | "button_ghost";
+}
+
+export declare class FieldView {
+  readonly name: string;
+  /** Post your value under it. */
+  readonly inputName: string | null;
+  readonly domId: string | null;
+  readonly type: "text" | "number" | "boolean" | "select" | "search" | "rows";
+  readonly label: string;
+  readonly required: boolean;
+  readonly options: OptionView[];
+  /** A search's record kind. */
+  readonly kind: string | null;
+  readonly searchUrl: string | null;
+  readonly searchField: string | null;
+  readonly rowKey: string | null;
+  readonly when: Record<string, unknown[]>;
+  readonly rows: RowsView | null;
+  readonly context: "choice" | "cell";
+  readonly disabled: boolean;
+  /** "fields/<type>". */
+  readonly piece: PieceName;
+  readonly cell: boolean;
+  readonly labelled: boolean;
+  readonly data: Record<string, string>;
+  readonly segmented: boolean;
+}
+
+export declare class RowsView {
+  readonly name: string;
+  readonly label: string;
+  readonly inputName: string;
+  readonly searchUrl: string;
+  readonly columns: FieldView[];
+  readonly rows: RowView[];
+  /** The column "Set all to:" sets, or null. */
+  readonly setAll: FieldView | null;
+}
+
+export declare class RowView {
+  readonly key: string;
+  readonly label: string;
+  readonly detail: string | null;
+  readonly values: Record<string, unknown>;
+  readonly valuesJson: string;
+  readonly index: number;
+  readonly cells: CellView[];
+  readonly segmentedCells: CellView[];
+  readonly fieldCells: CellView[];
+}
+
+export declare class CellView {
+  readonly column: string;
+  readonly label: string;
+  /** null for a value the row already has. */
+  readonly field: FieldView | null;
+  readonly preset: string | null;
+  readonly when: Record<string, unknown[]>;
+  readonly whenJson: string;
+  readonly shown: boolean;
+  readonly hidden: boolean;
+  readonly required: boolean;
+  readonly segmented: boolean;
+}
+
+export declare class RunStatusView {
+  static fromSync(sync: SyncStatus, options?: { urls?: Urls; error?: string | null; connection?: Connection | null; now?: Date; messages?: Readonly<Record<string, string>> }): RunStatusView;
+  static stallOf(connection: Connection | null | undefined): string | null;
+  readonly status: SyncStatusName;
+  readonly state: string | null;
+  /** A few words, for the pill. */
+  readonly summary: string | null;
+  /** Why it failed or was cancelled, as a sentence. */
+  readonly reason: string | null;
+  readonly detail: string | null;
+  readonly quietText: string | null;
+  readonly retryUrl: string | null;
+  readonly redeliverUrl: string | null;
+  readonly error: string | null;
+  /** The stalled connection's reason ("not_checking_in", "quickbooks_unavailable", ...) while a sending status waits on it. */
+  readonly stall: string | null;
+  readonly stallText: string | null;
+  readonly visible: boolean;
+  readonly cssClass: string;
+}
+
 export interface RenderOptions {
   /** Where the questions router is mounted. Default "". */
   mount?: string;
@@ -941,30 +1153,62 @@ export interface RenderOptions {
   csrfField?: string;
   /** A message to show once, above it (takeError's, from qubesync/express). */
   error?: string | null;
+  /** Your pieces for this render, over the pieces setting's. */
+  pieces?: Pieces;
+  /** Your classes for this render, over the uiClasses setting's. */
+  uiClasses?: UiClasses;
+  /** Your words for this render, over the messages setting's. */
+  messages?: Messages;
 }
 
 export interface RenderQuestionOptions extends RenderOptions {
-  /** Your Content-Security-Policy's nonce, on the search box's script. */
+  /** Unused: the question has no inline script now (renderAssets has the script's tag). */
   nonce?: string | null;
 }
 
 export interface RenderRunStatusOptions extends RenderOptions {
   /** For tests: the time unconfirmed() is judged at. */
   now?: Date;
+  /** The connection the page is about (else the latest run's): while it's stalled, the status says why. */
+  connection?: Connection | null;
 }
 
-/** The run's open question as HTML (every value escaped), with a form per choice; "" when it isn't asking. */
+/** The run's open question as HTML (every value escaped): picks, forms and exits; the error alone when it isn't asking. */
 export declare function renderQuestion(run: Run | SyncStatus | null | undefined, options?: RenderQuestionOptions): string;
 /**
- * The record's sync status in a sentence, a failure's detail, and buttons for a stuck run ("Send its latest news again")
- * and an unconfirmed start; "" when not sent. A bare Run is read without its link.
+ * The record's sync status: the pill's few words, why, a stall, and buttons for a stuck run ("Check for updates") and an
+ * unconfirmed start ("Try sending again"); "" when not sent. A bare Run is read without its link.
  */
 export declare function renderRunStatus(status: SyncStatus | Run | null | undefined, options?: RenderRunStatusOptions): string;
+/** The behaviour script's tag (deferred), and with stylesheet: true the stylesheet's, served under mount by questions(). */
+export declare function renderAssets(options?: { mount?: string; stylesheet?: boolean; nonce?: string | null }): string;
 export declare function escapeHtml(value: unknown): string;
-/** The search box's script, for markup of your own. */
-export declare const SEARCH_SCRIPT: string;
-/** A rows field's script (each cell's "when", and "Set selected"), for markup of your own. */
-export declare const ROWS_SCRIPT: string;
+/** The behaviour script's file (qubesync/kit/question.js). */
+export declare const QUESTION_SCRIPT_PATH: string;
+/** The opt-in stylesheet's file (qubesync/kit/qubesync.css). */
+export declare const STYLESHEET_PATH: string;
+export declare const ASSET_ROUTES: Readonly<{ script: string; stylesheet: string }>;
+
+export interface StoryboardScreen {
+  key: string;
+  group: string;
+  title: string;
+  note: string;
+  /** The pieces it shows, to replace. */
+  pieces: PieceName[];
+  kind: "run_status" | "error" | "question";
+  sample: any;
+}
+
+export declare const storyboard: {
+  readonly QUESTIONS: readonly string[];
+  readonly NOTHING_SENT: string;
+  screens(): readonly StoryboardScreen[];
+  findScreen(key: string): StoryboardScreen | null;
+  matches(screen: StoryboardScreen | null, field: unknown, q: unknown): SearchMatch[];
+  /** The storyboard's body (no layout). */
+  render(options?: { mount?: string; list?: readonly StoryboardScreen[]; notice?: string | null; csrfToken?: string | null; csrfField?: string; pieces?: Pieces; uiClasses?: UiClasses; messages?: Messages }): string;
+};
 
 // ---------------------------------------------------------------------------
 // Mapping helpers

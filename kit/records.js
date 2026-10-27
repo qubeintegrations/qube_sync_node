@@ -7,6 +7,7 @@
 const { client } = require("./client");
 const { StoreConflict, UnknownOperation } = require("./errors");
 const { settings } = require("./settings");
+const { t } = require("./messages");
 const { familyFor } = require("./store");
 
 // The type and id a polymorphic column keeps for record: its type (the recordType setting, by
@@ -434,48 +435,57 @@ class Run {
     return this.state === "awaiting_input" && !this.openQuestion();
   }
 
-  // Where it stands, in one plain sentence for a person: "Added to QuickBooks", "Done",
-  // "Failed: <message>", "Cancelled: <reason>", "Waiting for your answer", "Starting", "Not
-  // confirmed by QuBe Sync yet" or "Running".
-  summaryText(now = new Date()) {
-    if (this.cancelled()) return `Cancelled: ${this.cancelReasonText()}`;
+  // Where it stands, in a few words for a person: "Added to QuickBooks", "Done", "Couldn't sync",
+  // "Cancelled", "Needs your answer", "Sending to QuickBooks", "Still waiting for QuickBooks" or
+  // "Syncing with QuickBooks" (the messages setting's words). Why is reasonText().
+  summaryText(now = new Date(), messages) {
+    const say = (key, vars) => t(key, vars, messages);
+    if (this.cancelled()) return say("status.cancelled");
 
     switch (this.state) {
       case "starting":
-        return this.unconfirmed(now) ? "Not confirmed by QuBe Sync yet" : "Starting";
+        return say(this.unconfirmed(now) ? "status.unconfirmed" : "status.starting");
       case "completed": {
         const outcome = blank(this.outcome) ? "" : String(this.outcome);
-        if (outcome === "added") return "Added to QuickBooks";
-        if (outcome === "" || outcome === "completed") return "Done";
-        return `Done: ${humanize(outcome)}`;
+        if (outcome === "added") return say("status.added");
+        if (outcome === "" || outcome === "completed") return say("status.done");
+        return say("status.done_with", { outcome: humanize(outcome) });
       }
-      case "failed": {
-        const message = this.errorMessage();
-        return message ? `Failed: ${message}` : "Failed";
-      }
+      case "failed":
+        return say("status.failed");
       case "awaiting_input":
-        return "Waiting for your answer";
+        return say("status.needs_answer");
       default:
-        return "Running";
+        return say("status.running");
     }
   }
 
+  /** Why it failed (its error message) or was cancelled (the reason it carried), as a sentence, or null. */
+  reasonText(messages) {
+    let text = "";
+    if (this.cancelled()) text = blank(this.cancelReason) ? "" : String(this.cancelReason).trim();
+    else if (this.state === "failed") text = (this.errorMessage(messages) || "").trim();
+    if (text === "") return null;
+    text = text[0].toUpperCase() + text.slice(1);
+    return /[.!?]$/.test(text) ? text : `${text}.`;
+  }
+
   /** Why it was cancelled: the reason it carried, else what a cancelled outcome means. */
-  cancelReasonText() {
+  cancelReasonText(messages) {
     const reason = blank(this.cancelReason) ? "" : String(this.cancelReason).trim();
-    return reason === "" ? "your app chose to stop" : reason;
+    return reason === "" ? t("status.cancel_reason", null, messages) : reason;
   }
 
   // A failed run's message: its error's own (a sentence, or the message of a code, message and
   // detail), else its outcome in words, or null.
-  errorMessage() {
+  errorMessage(messages) {
     const { error } = this;
     let text = null;
     if (typeof error === "string") text = error;
     else if (error !== null && typeof error === "object" && !Array.isArray(error)) text = error.message || error.detail;
     text = blank(text) ? "" : String(text).trim();
     if (text !== "") return text;
-    if (blank(this.outcome) && blank(this.endedAt)) return "it couldn't be started";
+    if (blank(this.outcome) && blank(this.endedAt)) return t("status.not_started", null, messages);
 
     return blank(this.outcome) || this.outcome === "failed" ? null : humanize(this.outcome);
   }
