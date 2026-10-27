@@ -520,6 +520,7 @@ module.exports = configure({
 | `enqueue` | `(delivery) →` hands `{ kind, id, body }` (kind `"run"`, `"connection"` or `"request"`) to your queue; `false` or a throw answers 503 | `job(delivery)` in this process, after the response, with a warning |
 | `jobAttempts` | how many times `job()` runs a delivery whose work threw, with a growing wait, before it logs an error and throws | `10` |
 | `pruneRunsAfter` | milliseconds ended runs and requests are kept before `pruneRuns()` deletes them: a day (`DAY_MS`) or more ([Storage](#storage)) | `null`: never |
+| `connectionType` | the type onboarding creates connections as: `"realtime"` or `"standard"` (anything else throws). Workflows run only on realtime connections, billed as realtime. | `"realtime"` |
 | `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl` | | the environment above; `webhookSecret` may be a list while one rotates |
 
 The secrets never show: `console.log` and `JSON.stringify` of the settings say only whether each is
@@ -551,7 +552,7 @@ app.use(qube.questions(config));
 
 | Route | What it does |
 | --- | --- |
-| `POST quickbooks/connections` | Connect, for the signed-in account. Sends its newest connection that has never connected (`pending` or `setup_cancelled`) back through setup, so clicking Connect again doesn't pile up connections. Makes a new one (the row, then QuBe Sync's connection with the row's webhook URL, then its `qubeId`, with an optional `name`) when the account has none, or with `new=1`. Redirects (303) to the setup. With `simulated=1`, outside production, it connects a simulated company file instead (below). |
+| `POST quickbooks/connections` | Connect, for the signed-in account. Sends its newest connection that has never connected (`pending` or `setup_cancelled`) back through setup, so clicking Connect again doesn't pile up connections. Makes a new one (the row, then QuBe Sync's connection with the row's webhook URL and the `connectionType` setting's type, then its `qubeId`, with an optional `name`) when the account has none, or with `new=1`. Redirects (303) to the setup. With `simulated=1`, outside production, it connects a simulated company file instead (below). |
 | `POST quickbooks/connections/:id/onboarding` | One of the signed-in account's connections, back through setup, with its webhook URL brought up to date (or made at QuBe Sync, for a row QuBe Sync never answered). Another account's connection answers 404. |
 | `DELETE quickbooks/connections/:id` | Disconnects one of the signed-in account's connections: QuBe Sync deletes its connection (already gone counts), then the row goes, with its runs, requests, QuickBooks ids and sync marks ([below](#disconnecting)). Goes back (303) with `RUNS_GOING` while a run or request hasn't ended, or `DISCONNECT_NO_ANSWER`; another account's connection answers 404. |
 | `POST quickbooks/connections/:id/disconnect` | The same, for an HTML form, which can't send `DELETE`. |
@@ -796,6 +797,8 @@ before it returns; starts the run with that reference as the idempotency key and
 - **Refused** (QuBe Sync answered 4xx) or an input that threw: nothing was started. The row is
   `failed` and the error thrown; start again. Not a 409, the reference in use by a call still in
   flight (the other click of a double click): that start may land, so the run stays `starting`.
+  A start refused because the connection is standard (422 `realtime_required`) throws
+  `RealtimeRequired`, whose message is QuBe Sync's, saying how to upgrade it.
 - **No answer** (a timeout, a 5xx, a dropped connection): the run may have started. The row stays
   `starting`, with its reference and input, and the error is thrown. Send it again with
   `await run.retryStart()` (or `CreateInvoice.retryStart(run)`), never with a new `start`: a new
@@ -809,7 +812,8 @@ moves it to that run's `createdAt`, never back, in `qube_sync_marks`, so it outl
 `retryStart` resends the same reference as the `Idempotency-Key`, with the same workflow, input
 and webhook URL: QuBe Sync answers a repeat of a start it took with the run that start made, and
 starts nothing. It returns a run that already has its `qubeRunId` as it is, and refuses one that
-`failed`.
+`failed`. A refusal marks the run `failed` as `start`'s does, and one for a standard connection
+throws `RealtimeRequired`.
 
 Each event is applied under the run row's lock (`withRunLock`): one whose reference isn't the
 run's, or whose `connection_id` isn't its connection's, is skipped and logged; a notification is

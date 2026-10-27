@@ -142,7 +142,11 @@ async function sendToSetup(connection, { fresh = false } = {}) {
     await client().updateConnection(connection.qubeId, { webhookUrl: connection.webhookUrl() });
     made = await client().regenerateOnboarding(connection.qubeId);
   } else {
-    made = await client().createConnection({ webhookUrl: connection.webhookUrl(), name: connection.name || undefined });
+    made = await client().createConnection({
+      webhookUrl: connection.webhookUrl(),
+      name: connection.name || undefined,
+      type: settings().connectionType,
+    });
     await connection.update({ qubeId: String(made.id) });
   }
 

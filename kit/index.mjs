@@ -15,6 +15,7 @@ export const {
   NotConnected,
   MissingReference,
   StoreConflict,
+  RealtimeRequired,
   APIError,
   memoryStore,
   STORE_METHODS,

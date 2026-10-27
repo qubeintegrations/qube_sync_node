@@ -269,8 +269,18 @@ describe("express: connect", () => {
     const [connection] = await kit.Connection.ownedBy(account);
     assert.deepStrictEqual([connection.qubeId, connection.name, connection.status], ["conn-q-1", "Main file", "pending"]);
     assert.deepStrictEqual(fake.received.map((r) => [r.method, r.path, r.body]), [
-      ["POST", "/api/v2/connections", { webhook_url: `${WEBHOOK_URL}/connections/${connection.id}`, name: "Main file" }],
+      ["POST", "/api/v2/connections", { webhook_url: `${WEBHOOK_URL}/connections/${connection.id}`, name: "Main file", type: "realtime" }],
     ]);
+  });
+
+  it("makes a standard connection when connectionType says so, and refuses any other type", async () => {
+    reset({ connectionType: "standard" });
+    const account = tables.Account.add();
+    answer(onboarding());
+    const res = await request(app(), form("/quickbooks/connections", {}, account));
+    assert.strictEqual(res.status, 303);
+    assert.strictEqual(fake.received[0].body.type, "standard");
+    assert.throws(() => kit.configure({ connectionType: "fast" }), /connectionType is "realtime" or "standard"/);
   });
 
   it("with simulated=1 makes a simulated connection on a new row and goes back to the page, even with one waiting", async () => {
@@ -398,7 +408,7 @@ describe("express: connect", () => {
     answer(data([]), onboarding("q-9"));
     const res = await request(app(), form(`/quickbooks/connections/${connection.id}/onboarding`, {}, account));
     assert.strictEqual(res.status, 303);
-    assert.deepStrictEqual(fake.received[1].body, { webhook_url: connection.webhookUrl(), name: "Main" });
+    assert.deepStrictEqual(fake.received[1].body, { webhook_url: connection.webhookUrl(), name: "Main", type: "realtime" });
     assert.strictEqual((await kit.Connection.get(connection.id)).qubeId, "q-9");
   });
 

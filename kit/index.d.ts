@@ -313,6 +313,8 @@ export declare class NotConnected extends TypeError {}
 export declare class MissingReference extends TypeError {}
 /** A store's write broke a unique key. */
 export declare class StoreConflict extends Error {}
+/** A start QuBe Sync refused (422 realtime_required): the connection is standard. The message says how to upgrade it. */
+export declare class RealtimeRequired extends Error {}
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -378,6 +380,8 @@ export interface SettingsOptions<Request = any> {
   jobAttempts?: number | null;
   /** Milliseconds ended runs and requests are kept before pruneRuns() deletes them: at least DAY_MS. Default null: never. */
   pruneRunsAfter?: number | null;
+  /** The type onboarding creates connections as. Workflows run only on realtime ones. Default "realtime". */
+  connectionType?: "realtime" | "standard" | null;
   /** Default: QUBE_API_KEY. Never logged or shown. */
   apiKey?: string | null;
   /** Default: QUBE_URL, else https://qubesync.com. */
@@ -400,6 +404,7 @@ export declare class Settings {
   readonly enqueue: (delivery: QubeDelivery) => unknown;
   readonly jobAttempts: number;
   readonly pruneRunsAfter: number | null;
+  readonly connectionType: "realtime" | "standard";
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly webhookSecret: string | readonly string[];

@@ -809,6 +809,15 @@ describe("kit: Operation.start", () => {
     assert.strictEqual(run.summaryText(), "Failed: it couldn't be started");
   });
 
+  it("throws RealtimeRequired, with QuBe Sync's detail, and marks the run failed, when the connection is standard", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    const detail = "Workflows run on realtime connections. This connection is standard: upgrade it.";
+    answer(apiError(422, { code: "realtime_required", detail }));
+    await assert.rejects(CreateInvoice.start(invoice, connection), (err) => err instanceof kit.RealtimeRequired && err.message === detail);
+    assert.strictEqual((await kit.Run.latestFor(invoice, "create_invoice")).state, "failed");
+  });
+
   it("marks the run failed when its input throws, before anything is sent", async () => {
     reset();
     const { connection, invoice } = await unsent();
@@ -940,6 +949,17 @@ describe("kit: retryStart", () => {
     assert.deepStrictEqual(second.body, first.body);
     assert.strictEqual(second.headers["idempotency-key"], run.reference);
     assert.deepStrictEqual([retried.qubeRunId, retried.state, retried.runUrl], ["run-q-1", "running", "r"]);
+  });
+
+  it("throws RealtimeRequired and marks the run failed when the resent start is refused for a standard connection", async () => {
+    reset();
+    const { connection, invoice } = await unsent();
+    answer(apiError(500, "boom"));
+    await assert.rejects(CreateInvoice.start(invoice, connection));
+    const run = await kit.Run.latestFor(invoice, "create_invoice");
+    answer(apiError(422, { code: "realtime_required" }));
+    await assert.rejects(run.retryStart(), (err) => err instanceof kit.RealtimeRequired && /this one is standard/.test(err.message));
+    assert.strictEqual((await kit.Run.latestFor(invoice, "create_invoice")).state, "failed");
   });
 
   it("returns a run already answered as it is, and refuses one that failed", async () => {

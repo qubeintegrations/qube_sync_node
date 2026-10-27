@@ -4,6 +4,12 @@
 
 From qube_rails' second round (2026-10-27):
 
+- **Realtime connections**: workflows run only on realtime connections. Onboarding creates
+  connections with the `connectionType` setting's type, `"realtime"` (the default) or
+  `"standard"` (anything else throws); simulated connections stay simulated. A start or
+  `retryStart()` refused with 422 `realtime_required` marks the run `failed` and throws
+  `RealtimeRequired` (from `qubesync/kit`), with QuBe Sync's detail as its message.
+
 - **Disconnect**: `DELETE quickbooks/connections/:id`, and `POST quickbooks/connections/:id/disconnect`
   for an HTML form (`disconnectQuickbooks({ request, id })`), deletes QuBe Sync's connection (a 404
   counts as gone), then, in one transaction, calls `ConnectionEvents#disconnected()` (delete your own

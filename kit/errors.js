@@ -57,4 +57,13 @@ class StoreConflict extends Error {
   }
 }
 
-module.exports = { NotConfigured, UnknownOperation, NotReady, NotConnected, MissingReference, StoreConflict };
+// QuBe Sync refused a start (422 realtime_required): workflows run on realtime connections, and
+// this one is standard. Its message is QuBe Sync's, saying how to upgrade it.
+class RealtimeRequired extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RealtimeRequired";
+  }
+}
+
+module.exports = { NotConfigured, UnknownOperation, NotReady, NotConnected, MissingReference, StoreConflict, RealtimeRequired };

@@ -42,6 +42,7 @@ module.exports = {
   NotConnected: errors.NotConnected,
   MissingReference: errors.MissingReference,
   StoreConflict: errors.StoreConflict,
+  RealtimeRequired: errors.RealtimeRequired,
   APIError,
   // The store
   memoryStore,

@@ -24,6 +24,7 @@ const KEYS = Object.freeze([
   "enqueue",
   "jobAttempts",
   "pruneRunsAfter",
+  "connectionType",
   "apiKey",
   "baseUrl",
   "webhookSecret",
@@ -44,6 +45,7 @@ const ENV = Object.freeze({
 const DEFAULT_BASE_URL = "https://qubesync.com";
 const DEFAULT_JOB_ATTEMPTS = 10;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const CONNECTION_TYPES = Object.freeze(["realtime", "standard"]);
 
 let values = {};
 let changes = 0; // bumped by configure, so client() knows to make a new Client
@@ -138,6 +140,12 @@ const CHECKS = {
   pruneRunsAfter(value) {
     if (typeof value !== "number" || !Number.isFinite(value) || value < DAY_MS) {
       throw new TypeError(`QuBe Sync: pruneRunsAfter is null or milliseconds of a day or more (90 * 24 * 60 * 60 * 1000), in ${CONFIG_FILE}`);
+    }
+    return value;
+  },
+  connectionType(value) {
+    if (!CONNECTION_TYPES.includes(value)) {
+      throw new TypeError(`QuBe Sync: connectionType is "realtime" or "standard", in ${CONFIG_FILE}`);
     }
     return value;
   },
@@ -272,6 +280,11 @@ class Settings {
     return values.pruneRunsAfter || null;
   }
 
+  /** The type onboarding creates connections as: "realtime" (default; workflows need it) or "standard". */
+  get connectionType() {
+    return values.connectionType || "realtime";
+  }
+
   get apiKey() {
     return values.apiKey || fromEnv("apiKey");
   }
@@ -322,6 +335,7 @@ class Settings {
       else if (key === "connectionEvents") described[key] = values.connectionEvents ? values.connectionEvents.name : "[unset]";
       else if (key === "jobAttempts") described[key] = this.jobAttempts;
       else if (key === "pruneRunsAfter") described[key] = this.pruneRunsAfter;
+      else if (key === "connectionType") described[key] = this.connectionType;
       else if (key === "baseUrl" || key === "webhookUrl") {
         described[key] = values[key] || process.env[ENV[key]] || (key === "baseUrl" ? DEFAULT_BASE_URL : "[unset]");
       } else described[key] = values[key] ? "[set]" : "[default]";

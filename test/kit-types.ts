@@ -10,6 +10,7 @@ import {
   Operation,
   PlainRequest,
   QueuedRequest,
+  RealtimeRequired,
   Run,
   StoreConflict,
   SyncStatus,
@@ -141,6 +142,7 @@ const config: Settings = configure<SignedIn>({
   store,
   operations: { create_invoice: CreateInvoice, find_customer: FindCustomer },
   pruneRunsAfter: 90 * DAY_MS,
+  connectionType: "realtime",
   connectionEvents: QuickbooksConnectionEvents,
   currentAccount: (req) => (req.user ? findAccount(req.user.accountId) : null),
   findRecord: (type, id) => findByType(type, id),
@@ -210,6 +212,7 @@ async function worker(delivery: QubeDelivery) {
   } catch (err) {
     if (err instanceof APIError) console.log(err.status, err.code);
     if (err instanceof NotReady || err instanceof StoreConflict) console.log(err.message);
+    if (err instanceof RealtimeRequired) console.log(err.message);
     throw err;
   }
 }

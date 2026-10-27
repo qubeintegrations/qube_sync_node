@@ -3,7 +3,8 @@
 const { randomUUID } = require("crypto");
 
 const { client, isRefused } = require("./client");
-const { NotConnected } = require("./errors");
+const { APIError } = require("../client");
+const { NotConnected, RealtimeRequired } = require("./errors");
 const { withoutNils } = require("./mapping");
 const { Connection, Run, recordKey, blank } = require("./records");
 const { settings } = require("./settings");
@@ -122,6 +123,7 @@ class Operation {
       });
     } catch (err) {
       if (Operation.#refused(err)) await Operation.#markFailed(run);
+      if (err instanceof APIError && err.code === "realtime_required") throw Operation.#realtimeRequired(err);
       throw err;
     }
     await Operation.#recordStart(run, started !== null && typeof started === "object" ? started : {});
@@ -132,6 +134,13 @@ class Operation {
   // other click of a double click), whose start may land: that run stays "starting".
   static #refused(err) {
     return isRefused(err) && err.status !== 409;
+  }
+
+  static #realtimeRequired(err) {
+    const detail = err.errors !== null && typeof err.errors === "object" ? err.errors.detail : null;
+    return new RealtimeRequired(
+      typeof detail === "string" && detail !== "" ? detail : "Workflows run on realtime connections, and this one is standard."
+    );
   }
 
   static async #markFailed(run) {
