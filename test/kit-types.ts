@@ -8,6 +8,8 @@ import {
   ConnectionEvents,
   NotReady,
   Operation,
+  PlainRequest,
+  QueuedRequest,
   Run,
   StoreConflict,
   SyncStatus,
@@ -18,6 +20,9 @@ import {
   familyFor,
   job,
   memoryStore,
+  pruneRuns,
+  DAY_MS,
+  RUNS_GOING,
   renderQuestion,
   renderRunStatus,
   run,
@@ -28,6 +33,8 @@ import type {
   ConnectionRow,
   NotificationEvent,
   QubeDelivery,
+  QueuedRequestRow,
+  RequestEvent,
   QuickbooksRecordRow,
   RunRow,
   SyncStatusName,
@@ -36,7 +43,7 @@ import type {
   WorkflowRunEvent,
 } from "qubesync/kit";
 import { connect, questions, takeError, webhooks } from "qubesync/express";
-import { connectQuickbooks, redeliver, receiveWebhook } from "qubesync/kit";
+import { connectQuickbooks, disconnectQuickbooks, redeliver, receiveWebhook } from "qubesync/kit";
 import storeTests = require("qubesync/kit/store-tests");
 
 // The app's own records.
@@ -88,6 +95,26 @@ class CreateInvoice extends Operation<Invoice> {
   }
 }
 
+// quickbooks-desktop/find-customer.ts: a plain request.
+class FindCustomer extends PlainRequest<Customer> {
+  static operation = "customer.query";
+  static slug = "find_customer";
+
+  params() {
+    return { full_name: this.record.name };
+  }
+
+  async answered(event: RequestEvent) {
+    const response = event.responseJson as { data?: Array<{ list_id: string; full_name: string }> } | null;
+    const found = response && response.data && response.data[0];
+    if (found && this.connection) await this.connection.link(this.record, { kind: "customer", qbId: found.list_id, name: found.full_name });
+  }
+
+  async timedOut(event: RequestEvent) {
+    await this.failed(event);
+  }
+}
+
 // quickbooks-desktop/connection-events.ts
 class QuickbooksConnectionEvents extends ConnectionEvents {
   async connected(event: ConnectionEvent) {
@@ -99,6 +126,10 @@ class QuickbooksConnectionEvents extends ConnectionEvents {
   async stalled(_event: ConnectionEvent) {
     if (this.connection.notCheckingIn()) console.log("turn the QuickBooks computer on");
   }
+
+  async disconnected() {
+    await this.store.getConnection(this.connection.id);
+  }
 }
 
 // quickbooks-desktop/config.ts
@@ -108,7 +139,8 @@ type SignedIn = Request & { user?: { accountId: number } };
 const store: Store = memoryStore();
 const config: Settings = configure<SignedIn>({
   store,
-  operations: { create_invoice: CreateInvoice },
+  operations: { create_invoice: CreateInvoice, find_customer: FindCustomer },
+  pruneRunsAfter: 90 * DAY_MS,
   connectionEvents: QuickbooksConnectionEvents,
   currentAccount: (req) => (req.user ? findAccount(req.user.accountId) : null),
   findRecord: (type, id) => findByType(type, id),
@@ -149,6 +181,10 @@ app.get("/invoices/:id", async (req, res) => {
   const latest = await SyncStatus.latest(invoice, "create_invoice");
   const stuck: boolean = latest.run !== null && latest.run.looksStuck();
   const reused: boolean = (await CreateInvoice.start(invoice, connection)).reused;
+  const queued: QueuedRequest = await FindCustomer.queue(new Customer(1, "Riverbend"), connection);
+  const row: QueuedRequestRow = queued;
+  const since: Date | null = await connection.lastSyncedAt("pull_changes");
+  void [row.state, queued.done(), queued.webhookUrl(), since];
   const error: string | null = takeError(req, res);
   const where: string = connection.inQuickbooksSql("invoices", { recordType: "Invoice" }) + connection.sendingSql("invoices", { recordType: "Invoice", operation: "create_invoice", dialect: "mysql" });
   res.send(renderRunStatus(sync, { error }) + renderQuestion(sync) + name + qbId + retry + stuck + reused + where + REDELIVERY_REFUSED[409] + SIGNATURE_HINTS.stale);
@@ -156,6 +192,11 @@ app.get("/invoices/:id", async (req, res) => {
 
 async function routes(req: Request): Promise<number> {
   const simulated = await connectQuickbooks({ request: req, simulated: true });
+  const gone = await disconnectQuickbooks({ request: req, id: "1" });
+  const goneError: string | undefined = "error" in gone ? gone.error : RUNS_GOING;
+  const pruned: { runs: number; requests: number } = await pruneRuns();
+  void goneError;
+  void pruned;
   const again = await redeliver({ runId: "1", request: req });
   const refused = await receiveWebhook({ kind: "run", id: "1", body: "", signature: null, path: "/webhooks/qube/runs/1" });
   return simulated.status + again.status + refused.status + ("error" in again && again.error ? 1 : 0);

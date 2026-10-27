@@ -3,13 +3,16 @@
 // memoryStore(): a store kept in this process's memory, for tests and trying the kit out. It
 // keeps the same unique keys as schema.sql (a write that breaks one throws StoreConflict), rolls
 // a transaction back when its function throws (a nested one is a savepoint), holds a lock per
-// run and per connection, and keeps the JSON columns as text, so a row reads back as an SQL store
+// run, request and connection, and keeps the JSON columns as text, so a row reads back as an SQL store
 // would hand it. Everything is lost when the process ends: never use it in production.
 
 const { StoreConflict } = require("./errors");
 const { JSON_COLUMNS } = require("./store");
 
-const TABLES = ["connections", "runs", "notifications", "quickbooksRecords"];
+const TABLES = ["connections", "runs", "notifications", "quickbooksRecords", "syncMarks", "requests", "requestDeliveries"];
+const DATE_COLUMNS = ["createdAt", "updatedAt", "endedAt", "startedAt"];
+// Tables whose rows have no updatedAt.
+const INSERT_ONLY = ["notifications", "requestDeliveries"];
 
 // An id from a URL is a string: the memory store's ids are whole numbers, so anything else is
 // no row, as an SQL store's lookup of "abc" in a bigint column should be.
@@ -49,7 +52,7 @@ function stored(row) {
   for (const column of JSON_COLUMNS) {
     if (column in kept) kept[column] = kept[column] === null || kept[column] === undefined ? null : JSON.stringify(kept[column]);
   }
-  for (const column of ["createdAt", "updatedAt", "endedAt"]) {
+  for (const column of DATE_COLUMNS) {
     if (kept[column] instanceof Date) kept[column] = kept[column].getTime();
     else if (column in kept && kept[column] !== null && kept[column] !== undefined) kept[column] = new Date(kept[column]).getTime();
   }
@@ -63,7 +66,7 @@ function loaded(kept) {
   for (const column of JSON_COLUMNS) {
     if (column in row) row[column] = row[column] === null ? null : JSON.parse(row[column]);
   }
-  for (const column of ["createdAt", "updatedAt", "endedAt"]) {
+  for (const column of DATE_COLUMNS) {
     if (column in row) row[column] = row[column] === null || row[column] === undefined ? null : new Date(row[column]);
   }
   return row;
@@ -105,6 +108,10 @@ class MemoryStore {
 
   async withRunLock(id, fn) {
     return this.#locked(`run:${id}`, (tx) => tx.getRun(id).then((row) => fn(tx, row)));
+  }
+
+  async withRequestLock(id, fn) {
+    return this.#locked(`request:${id}`, (tx) => tx.getRequest(id).then((row) => fn(tx, row)));
   }
 
   // fn in a transaction holding key's lock, released once it has committed or rolled back. A
@@ -163,7 +170,7 @@ class MemoryStore {
   #insert(name, row) {
     this.#state.ids[name] += 1;
     const now = new Date();
-    const kept = stored({ ...row, id: this.#state.ids[name], createdAt: now, ...(name === "notifications" ? {} : { updatedAt: now }) });
+    const kept = stored({ ...row, id: this.#state.ids[name], createdAt: now, ...(INSERT_ONLY.includes(name) ? {} : { updatedAt: now }) });
     this.#check(name, kept);
     this.#put(name, kept);
     return loaded(kept);
@@ -178,6 +185,10 @@ class MemoryStore {
     this.#check(name, kept);
     this.#put(name, kept);
     return loaded(kept);
+  }
+
+  #rows(name, test) {
+    return [...this.#table(name).values()].filter(test);
   }
 
   #get(name, id) {
@@ -197,6 +208,13 @@ class MemoryStore {
     if (name === "runs" && clash((o) => same(o.reference, kept.reference))) conflict(`qube_runs.reference ${kept.reference}`);
     if (name === "notifications" && clash((o) => same(o.runId, kept.runId) && same(o.deliveryId, kept.deliveryId))) {
       conflict(`qube_notifications (run_id, delivery_id) ${kept.runId}, ${kept.deliveryId}`);
+    }
+    if (name === "syncMarks" && clash((o) => same(o.connectionId, kept.connectionId) && o.workflow === kept.workflow)) {
+      conflict(`qube_sync_marks (connection_id, workflow) ${kept.connectionId}, ${kept.workflow}`);
+    }
+    if (name === "requests" && clash((o) => same(o.reference, kept.reference))) conflict(`qube_requests.reference ${kept.reference}`);
+    if (name === "requestDeliveries" && clash((o) => same(o.requestId, kept.requestId) && o.dedupeKey === kept.dedupeKey)) {
+      conflict(`qube_request_deliveries (request_id, dedupe_key) ${kept.requestId}, ${kept.dedupeKey}`);
     }
     if (name === "quickbooksRecords") {
       if (clash((o) => same(o.connectionId, kept.connectionId) && o.list === kept.list && o.qbId === kept.qbId)) {
@@ -334,6 +352,126 @@ class MemoryStore {
   async deleteQuickbooksRecord(id) {
     const key = idFrom(id);
     if (key !== null) this.#remove("quickbooksRecords", key);
+  }
+
+  // -------------------------------------------------------------------------
+  // Disconnecting and pruning
+
+  // The row and everything kept against it: runs (with their notifications), requests (with
+  // their deliveries), QuickBooks ids and sync marks.
+  async deleteConnection(id) {
+    const key = idFrom(id);
+    if (key === null || !this.#table("connections").get(key)) return false;
+    const on = (row) => same(row.connectionId, key);
+    for (const run of this.#rows("runs", on)) this.#removeRun(run.id);
+    for (const request of this.#rows("requests", on)) this.#removeRequest(request.id);
+    for (const row of this.#rows("quickbooksRecords", on)) this.#remove("quickbooksRecords", row.id);
+    for (const row of this.#rows("syncMarks", on)) this.#remove("syncMarks", row.id);
+    this.#remove("connections", key);
+    return true;
+  }
+
+  async hasWorkGoing(connectionId, { endedStates }) {
+    const on = (row) => same(row.connectionId, connectionId);
+    const runs = this.#rows("runs", (row) => on(row) && !endedStates.includes(row.state));
+    return runs.length > 0 || this.#rows("requests", (row) => on(row) && row.endedAt === null).length > 0;
+  }
+
+  async pruneRuns({ states, before, limit }) {
+    const cutoff = before.getTime();
+    const rows = this.#rows("runs", (row) => states.includes(row.state) && (row.endedAt === null ? row.updatedAt : row.endedAt) < cutoff)
+      .sort((a, b) => a.id - b.id)
+      .slice(0, limit);
+    for (const row of rows) this.#removeRun(row.id);
+    return rows.length;
+  }
+
+  async pruneRequests({ before, limit }) {
+    const cutoff = before.getTime();
+    const rows = this.#rows("requests", (row) => row.endedAt !== null && row.endedAt < cutoff)
+      .sort((a, b) => a.id - b.id)
+      .slice(0, limit);
+    for (const row of rows) this.#removeRequest(row.id);
+    return rows.length;
+  }
+
+  #removeRun(id) {
+    for (const row of this.#rows("notifications", (n) => same(n.runId, id))) this.#remove("notifications", row.id);
+    this.#remove("runs", id);
+  }
+
+  #removeRequest(id) {
+    for (const row of this.#rows("requestDeliveries", (d) => same(d.requestId, id))) this.#remove("requestDeliveries", row.id);
+    this.#remove("requests", id);
+  }
+
+  // -------------------------------------------------------------------------
+  // Sync marks
+
+  async getSyncMark(connectionId, workflow) {
+    const [row] = this.#rows("syncMarks", (o) => same(o.connectionId, connectionId) && o.workflow === String(workflow));
+    return loaded(row || null);
+  }
+
+  // Never moves it back.
+  async advanceSyncMark(connectionId, workflow, startedAt) {
+    const at = new Date(startedAt);
+    const [row] = this.#rows("syncMarks", (o) => same(o.connectionId, connectionId) && o.workflow === String(workflow));
+    if (!row) return this.#insert("syncMarks", { connectionId, workflow: String(workflow), startedAt: at });
+    if (row.startedAt < at.getTime()) return this.#update("syncMarks", row.id, { startedAt: at });
+    return loaded(row);
+  }
+
+  // -------------------------------------------------------------------------
+  // Plain requests
+
+  async createRequest(fields) {
+    const { connectionId, operation, recordType, recordId, reference, ...rest } = fields;
+    return this.#insert("requests", {
+      connectionId,
+      operation,
+      recordType: text(recordType),
+      recordId: text(recordId),
+      reference,
+      qubeId: null,
+      state: "queued",
+      params: null,
+      error: null,
+      pagesAnswered: 0,
+      lastPage: null,
+      endedAt: null,
+      ...rest,
+    });
+  }
+
+  async getRequest(id) {
+    return this.#get("requests", id);
+  }
+
+  async updateRequest(id, changes) {
+    return this.#update("requests", id, changes);
+  }
+
+  async latestRequest(recordType, recordId, operation, options) {
+    const { connectionId } = options || {};
+    const rows = this.#rows("requests", (row) => isRunOf(row, recordType, recordId, operation) && isOnConnection(row, connectionId))
+      .map(loaded)
+      .sort(newestFirst);
+    return rows[0] || null;
+  }
+
+  // Inserts the delivery unless its key is taken: whether it did.
+  async takeRequestDelivery(requestId, dedupeKey, { page = null, state }) {
+    const taken = this.#rows("requestDeliveries", (row) => same(row.requestId, requestId) && row.dedupeKey === String(dedupeKey));
+    if (taken.length > 0) return false;
+    this.#insert("requestDeliveries", { requestId, dedupeKey: String(dedupeKey), page, state: String(state) });
+    return true;
+  }
+
+  async findRequestDeliveries(requestId) {
+    return this.#rows("requestDeliveries", (row) => same(row.requestId, requestId))
+      .sort((a, b) => a.id - b.id)
+      .map(loaded);
   }
 }
 

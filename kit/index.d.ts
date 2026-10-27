@@ -1,8 +1,8 @@
 // Type definitions for qubesync/kit: QuBe Sync's integration kit without a framework.
 
-import type { APIError, Client, ConnectionEvent, NotificationEvent, WebhookEvent, WorkflowRunEvent } from "../index";
+import type { APIError, Client, ConnectionEvent, NotificationEvent, RequestEvent, WebhookEvent, WorkflowRunEvent } from "../index";
 
-export type { ConnectionEvent, NotificationEvent, WebhookEvent, WorkflowRunEvent };
+export type { ConnectionEvent, NotificationEvent, RequestEvent, WebhookEvent, WorkflowRunEvent };
 export { APIError } from "../index";
 
 /** A webhook, as qubesync parses it. */
@@ -93,6 +93,59 @@ export interface RunRow {
   cancelUrl: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/** A qube_sync_marks row: when the connection's last completed run of the workflow started. */
+export interface SyncMarkRow {
+  id: RowId;
+  connectionId: RowId;
+  workflow: string;
+  startedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** A qube_requests row: one plain v2 request. params and error are JSON. */
+export interface QueuedRequestRow {
+  id: RowId;
+  connectionId: RowId;
+  /** The PlainRequest's slug. */
+  operation: string;
+  recordType: string;
+  recordId: string;
+  /** The Idempotency-Key. */
+  reference: string;
+  qubeId: string | null;
+  /** queued, retryable, response_received, error, timed_out, discarded, or failed (refused, or params threw). */
+  state: string;
+  params: unknown;
+  error: unknown;
+  pagesAnswered: number;
+  lastPage: number | null;
+  endedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/** A qube_request_deliveries row: a request webhook taken, by page_request_id:state. */
+export interface RequestDeliveryRow {
+  id: RowId;
+  requestId: RowId;
+  dedupeKey: string;
+  page: number | null;
+  state: string;
+  createdAt: Date;
+}
+
+export interface NewQueuedRequest {
+  connectionId: RowId;
+  operation: string;
+  recordType: string;
+  recordId: string;
+  reference: string;
+  /** Default "queued". */
+  state?: string;
+  [field: string]: unknown;
 }
 
 /** A qube_quickbooks_records row. list is the kind's family (familyFor). */
@@ -201,6 +254,32 @@ export interface Store {
   createQuickbooksRecord(fields: NewQuickbooksRecord): Promise<QuickbooksRecordRow>;
   updateQuickbooksRecord(id: RowId, changes: Partial<QuickbooksRecordRow>): Promise<QuickbooksRecordRow | null>;
   deleteQuickbooksRecord(id: RowId): Promise<void>;
+
+  /** Deletes the connection with its runs (and their notifications), requests (and their deliveries), QuickBooks ids and sync marks. Called inside a transaction. */
+  deleteConnection(id: RowId): Promise<unknown>;
+  /** Whether the connection has a run whose state isn't one of endedStates, or a request with no endedAt. */
+  hasWorkGoing(connectionId: RowId, options: { endedStates: readonly string[] }): Promise<boolean>;
+
+  getSyncMark(connectionId: RowId, workflow: string): Promise<SyncMarkRow | null>;
+  /** Writes the mark, or moves it to startedAt when that's later: never back. */
+  advanceSyncMark(connectionId: RowId, workflow: string, startedAt: Date): Promise<unknown>;
+
+  /** Deletes up to limit runs in states whose COALESCE(endedAt, updatedAt) is before `before` (their notifications with them); resolves to how many. */
+  pruneRuns(options: { states: readonly string[]; before: Date; limit: number }): Promise<number>;
+  /** Deletes up to limit requests whose endedAt is before `before` (their deliveries with them); resolves to how many. */
+  pruneRequests(options: { before: Date; limit: number }): Promise<number>;
+
+  createRequest(fields: NewQueuedRequest): Promise<QueuedRequestRow>;
+  getRequest(id: RowId): Promise<QueuedRequestRow | null>;
+  updateRequest(id: RowId, changes: Partial<QueuedRequestRow>): Promise<QueuedRequestRow | null>;
+  /** A record's newest request of a slug (createdAt, then id, descending), or null; with connectionId, on that connection only. */
+  latestRequest(recordType: string, recordId: string, operation: string, options?: { connectionId?: RowId }): Promise<QueuedRequestRow | null>;
+  /** fn in a transaction holding the request row's lock, with the row as it is now (null when there's none). Re-entrant within its transaction. */
+  withRequestLock<T>(id: RowId, fn: (tx: Store, row: QueuedRequestRow | null) => Promise<T>): Promise<T>;
+  /** Inserts the delivery unless (requestId, dedupeKey) is taken; resolves to whether it did. In the caller's transaction. */
+  takeRequestDelivery(requestId: RowId, dedupeKey: string, fields: { page: number | null; state: string }): Promise<boolean>;
+  /** A request's deliveries, in id order. */
+  findRequestDeliveries(requestId: RowId): Promise<RequestDeliveryRow[]>;
 }
 
 /** A store kept in this process's memory: for tests and trying the kit out, never production. */
@@ -208,7 +287,12 @@ export declare function memoryStore(): Store;
 /** Every method a store has. */
 export declare const STORE_METHODS: readonly string[];
 /** Each table's columns, by the field a row has in JavaScript: the tables schema.sql makes. */
-export declare const STORE_COLUMNS: Readonly<Record<"qube_connections" | "qube_runs" | "qube_notifications" | "qube_quickbooks_records", Readonly<Record<string, string>>>>;
+export declare const STORE_COLUMNS: Readonly<
+  Record<
+    "qube_connections" | "qube_runs" | "qube_notifications" | "qube_quickbooks_records" | "qube_sync_marks" | "qube_requests" | "qube_request_deliveries",
+    Readonly<Record<string, string>>
+  >
+>;
 /** Where schema.sql is (also qubesync/kit/schema.sql). */
 export declare const SCHEMA_PATH: string;
 /** The list family a kind's ids are unique within: "name", "item", or the kind itself. */
@@ -219,7 +303,7 @@ export declare function familyFor(kind: string | null | undefined): string;
 
 /** A setting your app hasn't written, thrown the first time it's needed. */
 export declare class NotConfigured extends Error {}
-/** A run whose operation none of the operations setting has any more. */
+/** A run or request whose slug none of the operations setting has any more. */
 export declare class UnknownOperation extends Error {}
 /** A connection's event came before its qubeId was saved: the job throws it so the queue retries. */
 export declare class NotReady extends Error {}
@@ -235,7 +319,7 @@ export declare class StoreConflict extends Error {}
 
 /** A verified delivery, as enqueue is given it and run takes it. body is the raw body, as text. */
 export interface QubeDelivery {
-  kind: "run" | "connection";
+  kind: "run" | "connection" | "request";
   id: string;
   body: string;
 }
@@ -255,6 +339,16 @@ export type OperationClass = (new (record: any, run: Run) => Operation) & {
   retryStart(run: Run): Promise<Run>;
 };
 
+/** A PlainRequest subclass: the operations setting lists these too. */
+export type PlainRequestClass = (new (record: any, queuedRequest: QueuedRequest) => PlainRequest) & {
+  readonly slug: string;
+  /** The v2 operation id, such as "customer.query". */
+  readonly operation: string;
+  findRecord(id: string): Promise<any>;
+  recordFor(queuedRequest: QueuedRequest): Promise<any>;
+  retryQueue(queuedRequest: QueuedRequest): Promise<QueuedRequest>;
+};
+
 /** A ConnectionEvents subclass: the connectionEvents setting. */
 export type ConnectionEventsClass = new (connection: Connection) => ConnectionEvents;
 
@@ -262,8 +356,8 @@ export type ConnectionEventsClass = new (connection: Connection) => ConnectionEv
 export interface SettingsOptions<Request = any> {
   /** Where connections, runs, notifications and QuickBooks ids are kept. Required. */
   store?: Store | null;
-  /** slug → operation class. Each class's static slug must be its key. */
-  operations?: { [slug: string]: OperationClass } | Map<string, OperationClass> | null;
+  /** slug → Operation or PlainRequest class. Each class's static slug must be its key. */
+  operations?: { [slug: string]: OperationClass | PlainRequestClass } | Map<string, OperationClass | PlainRequestClass> | null;
   /** Your class for a connection's events (extends ConnectionEvents). */
   connectionEvents?: ConnectionEventsClass | null;
   /** The signed-in customer's account, from the request: it owns the connections onboarding makes. null answers 401. */
@@ -282,6 +376,8 @@ export interface SettingsOptions<Request = any> {
   enqueue?: ((delivery: QubeDelivery) => unknown) | null;
   /** How many times job() runs a delivery before it gives up. Default 10. */
   jobAttempts?: number | null;
+  /** Milliseconds ended runs and requests are kept before pruneRuns() deletes them: at least DAY_MS. Default null: never. */
+  pruneRunsAfter?: number | null;
   /** Default: QUBE_API_KEY. Never logged or shown. */
   apiKey?: string | null;
   /** Default: QUBE_URL, else https://qubesync.com. */
@@ -295,7 +391,7 @@ export interface SettingsOptions<Request = any> {
 /** The settings as read: each getter throws NotConfigured, naming your config file, when it's needed and unset. */
 export declare class Settings {
   readonly store: Store;
-  readonly operations: Map<string, OperationClass>;
+  readonly operations: Map<string, OperationClass | PlainRequestClass>;
   readonly connectionEvents: ConnectionEventsClass;
   readonly currentAccount: (request: any) => Awaitable<QubeRecord | null | undefined>;
   readonly authorizeQuestion: (request: any, record: any, run: Run) => Awaitable<unknown>;
@@ -303,6 +399,7 @@ export declare class Settings {
   readonly findRecord: (type: string, id: string) => Awaitable<any>;
   readonly enqueue: (delivery: QubeDelivery) => unknown;
   readonly jobAttempts: number;
+  readonly pruneRunsAfter: number | null;
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly webhookSecret: string | readonly string[];
@@ -310,8 +407,10 @@ export declare class Settings {
   readonly webhookUrl: string;
   /** Whether your app set key, rather than leaving it to a default or the environment. */
   isSet(key: string): boolean;
-  /** The operation class for a slug, or null. */
+  /** The Operation class for a slug, or null. */
   operationClass(slug: string): OperationClass | null;
+  /** The PlainRequest class for a slug, or null. */
+  requestClass(slug: string): PlainRequestClass | null;
   /** What's set, with the secrets hidden. */
   describe(): Record<string, unknown>;
   toJSON(): Record<string, unknown>;
@@ -320,6 +419,8 @@ export declare class Settings {
 export declare const SETTINGS: readonly string[];
 export declare const CONFIG_FILE: string;
 export declare const DEFAULT_JOB_ATTEMPTS: number;
+/** A day in milliseconds: pruneRunsAfter's least. */
+export declare const DAY_MS: number;
 
 /** Sets the kit's settings, once, in your app's quickbooks-desktop/config. Returns them. */
 export declare function configure<Request = any>(options: SettingsOptions<Request>): Settings;
@@ -405,6 +506,10 @@ export declare class Connection implements ConnectionRow {
   update(changes: Partial<ConnectionRow>): Promise<this>;
   /** record's newest run of operation on this connection, or null. */
   latestRun(record: QubeRecord, operation: string): Promise<Run | null>;
+  /** When its last completed run of workflow started, or null before one: a sync's next since. */
+  lastSyncedAt(workflow: string): Promise<Date | null>;
+  /** Deletes the row with its runs, requests, QuickBooks ids and sync marks, after your connectionEvents class's disconnected(), in one transaction. */
+  disconnect(): Promise<void>;
   /** Where record stands with QuickBooks here for operation, worked out from its runs and its link. Throws for a slug the operations setting doesn't have. */
   syncStatus(record: QubeRecord, operation: string, options?: { now?: Date }): Promise<SyncStatus>;
   /** `EXISTS (...)`: table's rows with a QuickBooks link on this connection. For a WHERE clause; values are inlined, checked. */
@@ -582,8 +687,10 @@ export declare class Operation<R extends QubeRecord = QubeRecord> {
   quickbooksRef(appRecord: QubeRecord | null | undefined, options: QuickbooksRefOptions): Promise<{ list_id: string } | { full_name: string } | null>;
   /** Links each reference an ending carries to the record your function returns for it (null skips it). */
   linkReferences(event: WorkflowRunEvent | { output?: unknown }, recordFor: (path: string, entry: QubeReference) => Awaitable<QubeRecord | null | undefined>): Promise<QuickbooksRecordRow[]>;
-  /** Forgets the question once answered, unless the run has asked another since. */
-  answered(token: string): Promise<void>;
+  /** Forgets the question once answered, unless the run has asked another since; taken: QuBe Sync took the answer, so the run is running again. */
+  answered(token: string, options?: { taken?: boolean }): Promise<void>;
+  /** When this connection's last completed run of the operation's workflow started, or null: a sync's since. */
+  lastSyncedAt(): Promise<Date | null>;
   /** The value without its null and undefined values, at every depth: typed as WithoutNils<T>. */
   withoutNils<T>(value: T): WithoutNils<T>;
   logEvent(event: QubeEvent): void;
@@ -604,14 +711,94 @@ export declare class ConnectionEvents {
   setupCancelled(event: ConnectionEvent): Promise<void>;
   stalled(event: ConnectionEvent): Promise<void>;
   resumed(event: ConnectionEvent): Promise<void>;
+  /** The account disconnected it: delete your rows that point at it, through this.store. In the transaction that deletes it. */
+  disconnected(): Promise<void>;
   logEvent(event: QubeEvent): void;
 }
+
+/** One plain v2 request: a qube_requests row with what it means, and its connection. */
+export declare class QueuedRequest implements QueuedRequestRow {
+  static get(id: RowId, store?: Store): Promise<QueuedRequest | null>;
+  static load(row: QueuedRequestRow, store?: Store): Promise<QueuedRequest>;
+  constructor(row: QueuedRequestRow, store?: Store, connection?: Connection | null);
+  readonly store: Store;
+  readonly connection: Connection | null;
+  /** Set by PlainRequest.queue when it returned this row rather than queueing another. Not saved. */
+  reused: boolean;
+
+  id: RowId;
+  connectionId: RowId;
+  operation: string;
+  recordType: string;
+  recordId: string;
+  reference: string;
+  qubeId: string | null;
+  state: string;
+  params: unknown;
+  error: unknown;
+  pagesAnswered: number;
+  lastPage: number | null;
+  endedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+
+  update(changes: Partial<QueuedRequestRow>): Promise<this>;
+  /** QUBE_WEBHOOK_URL/requests/<id>. */
+  webhookUrl(): string;
+  ended(): boolean;
+  /** Every page answered. */
+  done(): boolean;
+  /** A queue QuBe Sync never confirmed, sent again with the same params and Idempotency-Key. */
+  retryQueue(): Promise<QueuedRequest>;
+}
+
+/** One v2 operation your app queues itself, with no workflow, and what it does with its webhooks. */
+export declare class PlainRequest<R extends QubeRecord = QubeRecord> {
+  /** The slug its rows keep: its key in the operations setting. */
+  static slug: string;
+  /** The v2 operation id, such as "customer.query". */
+  static operation: string;
+  /** For an operation id this version doesn't know: its method and path (relative to the connection). */
+  static method?: string;
+  static path?: string;
+  /** record's request on connection: the one that hasn't ended (reused), else a new one queued. */
+  static queue<R extends QubeRecord>(this: new (record: R, queuedRequest: QueuedRequest) => PlainRequest<R>, record: R, connection: Connection | ConnectionRow): Promise<QueuedRequest>;
+  static retryQueue(queuedRequest: QueuedRequest): Promise<QueuedRequest>;
+  static findRecord(id: string): Promise<any>;
+  static recordFor(queuedRequest: QueuedRequest): Promise<any>;
+
+  constructor(record: R, queuedRequest: QueuedRequest | null);
+  record: R;
+  queuedRequest: QueuedRequest | null;
+  readonly connection: Connection | null;
+  /** Inside a handler, the request lock's transaction. */
+  readonly store: Store;
+
+  /** The operation's params, from the record. */
+  params(): unknown;
+  /** One answered page: event.responseJson, event.page. */
+  answered(event: RequestEvent): Promise<void>;
+  /** Every page 1..N answered. Called once. */
+  done(): Promise<void>;
+  /** error or discarded. */
+  failed(event: RequestEvent): Promise<void>;
+  /** QuBe Sync keeps trying. Never resend. */
+  retrying(event: RequestEvent): Promise<void>;
+  /** The answer never came back. Default: failed(event). */
+  timedOut(event: RequestEvent): Promise<void>;
+  /** Takes a delivery once by page_request_id:state, under the request's lock. */
+  handle(event: QubeEvent): Promise<void>;
+  logEvent(event: RequestEvent): void;
+}
+
+/** Deletes ended runs and requests older than the pruneRunsAfter setting (never within a day). Does nothing until it's set. */
+export declare function pruneRuns(options?: { now?: Date }): Promise<{ runs: number; requests: number }>;
 
 // ---------------------------------------------------------------------------
 // The routes' work
 
 export interface ReceiveWebhookInput {
-  kind: "run" | "connection";
+  kind: "run" | "connection" | "request";
   id: RowId;
   /** The raw body, exactly as received. */
   body: string | Uint8Array | null | undefined;
@@ -659,6 +846,12 @@ export declare function connectQuickbooks(input: {
 }): Promise<Redirect | { status: 303 } | { status: 401 | 404 }>;
 /** POST quickbooks/connections/:id/onboarding: one of the account's connections back through setup. */
 export declare function resendOnboarding(input: { request: any; id: RowId }): Promise<Redirect | { status: 401 | 404 }>;
+/** DELETE quickbooks/connections/:id: QuBe Sync's connection, then the row with everything kept against it. */
+export declare function disconnectQuickbooks(input: { request: any; id: RowId }): Promise<BackToPage | { status: 401 | 404 }>;
+/** disconnectQuickbooks's message while a run or request hasn't ended. */
+export declare const RUNS_GOING: string;
+/** disconnectQuickbooks's message when QuBe Sync didn't answer. */
+export declare const DISCONNECT_NO_ANSWER: string;
 
 export declare const QUESTION_CHANGED: string;
 export declare const NOT_STARTING: string;

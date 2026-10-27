@@ -2,6 +2,39 @@
 
 ## 0.3.0 (unreleased)
 
+From qube_rails' second round (2026-10-27):
+
+- **Disconnect**: `DELETE quickbooks/connections/:id`, and `POST quickbooks/connections/:id/disconnect`
+  for an HTML form (`disconnectQuickbooks({ request, id })`), deletes QuBe Sync's connection (a 404
+  counts as gone), then, in one transaction, calls `ConnectionEvents#disconnected()` (delete your own
+  rows that point at it) and deletes the row with its runs, requests, QuickBooks ids and sync marks
+  (`connection.disconnect()`). The signed-in account's connections only (404 otherwise); refused with
+  `RUNS_GOING` while a run or request hasn't ended, and `DISCONNECT_NO_ANSWER` when QuBe Sync doesn't
+  answer.
+- **Sync marks**: `qube_sync_marks`, moved to a run's `createdAt` by every `workflow_run.completed`
+  the kit applies, never back: `connection.lastSyncedAt(workflow)` and `operation.lastSyncedAt()`,
+  a sync's next `since` that outlives pruned runs.
+- **Opt-in pruning**: the `pruneRunsAfter` setting (milliseconds, at least `DAY_MS`; `null`, the
+  default, never prunes) and `pruneRuns()`, which your app schedules: ended runs by
+  `COALESCE(ended_at, updated_at)` and ended requests, never within a day of their end, 500 at a
+  time. Links and sync marks stay.
+- **Plain v2 requests**: `PlainRequest` (static `operation` and `slug`, `params()`, and the handlers
+  `answered`, `done`, `failed`, `retrying`, `timedOut`), listed in `operations`;
+  `PlainRequest.queue(record, connection)` resolves to a `QueuedRequest` (one at a time per record,
+  slug and connection under the connection lock; its `reference` is the `Idempotency-Key`; stored
+  `params`; `retryQueue()`), with their webhook route `POST webhooks/qube/requests/:id` (kind
+  `"request"`). Deliveries are taken once by `page_request_id:state`, in the handler's transaction,
+  and `done` fires once every page 1..N is in. `settings().requestClass(slug)`;
+  `operationClass(slug)` now finds only `Operation`s.
+- **An answer QuBe Sync took** puts the run back to `running` at once (`operation.answered(token, {
+  taken: true })`), so the sync status reads `sending`, not `needs_answer`, until the Web Connector's
+  next poll.
+- **The store** has `deleteConnection`, `hasWorkGoing`, `getSyncMark`, `advanceSyncMark`,
+  `pruneRuns`, `pruneRequests`, `createRequest`, `getRequest`, `updateRequest`, `latestRequest`,
+  `withRequestLock`, `takeRequestDelivery` and `findRequestDeliveries`; `schema.sql` adds
+  `qube_sync_marks`, `qube_requests` and `qube_request_deliveries` (qube_rails' tables), and
+  `qubesync/kit/store-tests` checks them.
+
 From the qube_rails walkthrough and the owner's review (2026-10-26):
 
 - **`Client#createConnection({ webhookUrl, name, type })`**: `type: "simulated"` makes a connection to

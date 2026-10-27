@@ -172,6 +172,32 @@ class SyncCustomer extends kit.Operation {
   }
 }
 
+// A plain request: what its handlers saw, in calls.
+class FindCustomer extends kit.PlainRequest {
+  static operation = "customer.query";
+  static slug = "find_customer";
+
+  params() {
+    return { full_name: this.record.name };
+  }
+
+  async answered(event) {
+    calls.push(["answered", event.page]);
+  }
+
+  async done() {
+    calls.push(["done", this.queuedRequest.lastPage]);
+  }
+
+  async failed(event) {
+    calls.push(["failed", event.state]);
+  }
+
+  async retrying(event) {
+    calls.push(["retrying", event.page]);
+  }
+}
+
 class Events extends kit.ConnectionEvents {
   async connected() {
     const owner = await this.owner();
@@ -207,7 +233,7 @@ function reset(extra = {}) {
   const store = kit.memoryStore();
   kit.configure({
     store,
-    operations: { create_invoice: CreateInvoice, sync_customer: SyncCustomer },
+    operations: { create_invoice: CreateInvoice, sync_customer: SyncCustomer, find_customer: FindCustomer },
     connectionEvents: Events,
     currentAccount: (request) => (request && request.account) || null,
     findRecord: (type, id) => (tables[type] ? tables[type].find(id) : null),
@@ -307,6 +333,7 @@ module.exports = {
   calls,
   CreateInvoice,
   SyncCustomer,
+  FindCustomer,
   Events,
   reset,
   makeConnection,

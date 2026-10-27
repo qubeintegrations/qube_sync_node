@@ -23,6 +23,7 @@ const KEYS = Object.freeze([
   "findRecord",
   "enqueue",
   "jobAttempts",
+  "pruneRunsAfter",
   "apiKey",
   "baseUrl",
   "webhookSecret",
@@ -42,6 +43,7 @@ const ENV = Object.freeze({
 
 const DEFAULT_BASE_URL = "https://qubesync.com";
 const DEFAULT_JOB_ATTEMPTS = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 let values = {};
 let changes = 0; // bumped by configure, so client() knows to make a new Client
@@ -63,11 +65,13 @@ function isSubclass(value, Base) {
   return typeof value === "function" && (value === Base || value.prototype instanceof Base);
 }
 
-// The operations as a Map, slug to class, checked: each is an Operation whose static slug is its
-// key, since a run row keeps the slug and the job finds the class by it. A fixed list, so a class
-// is never looked up from anything a request says.
+// The operations as a Map, slug to class, checked: each is an Operation (with a static workflow)
+// or a PlainRequest (with a static operation), whose static slug is its key, since a row keeps the
+// slug and the job finds the class by it. A fixed list, so a class is never looked up from
+// anything a request says.
 function operationMap(operations) {
   const { Operation } = require("./operation");
+  const { PlainRequest } = require("./request");
   let entries;
   if (operations instanceof Map) entries = [...operations.entries()];
   else if (operations && typeof operations === "object" && !Array.isArray(operations)) entries = Object.entries(operations);
@@ -75,16 +79,21 @@ function operationMap(operations) {
 
   const map = new Map();
   for (const [slug, OperationClass] of entries) {
-    if (!isSubclass(OperationClass, Operation) || OperationClass === Operation) {
-      throw new TypeError(`QuBe Sync: operations.${slug} must be a class that extends Operation (from qubesync/kit)`);
+    const isOperation = isSubclass(OperationClass, Operation) && OperationClass !== Operation;
+    const isRequest = isSubclass(OperationClass, PlainRequest) && OperationClass !== PlainRequest;
+    if (!isOperation && !isRequest) {
+      throw new TypeError(`QuBe Sync: operations.${slug} must be a class that extends Operation or PlainRequest (from qubesync/kit)`);
     }
     if (OperationClass.slug !== slug) {
       throw new TypeError(
         `QuBe Sync: operations.${slug} is ${OperationClass.name}, whose static slug is ${JSON.stringify(OperationClass.slug)}: they must match, since each run keeps its slug`
       );
     }
-    if (typeof OperationClass.workflow !== "string" || OperationClass.workflow === "") {
+    if (isOperation && (typeof OperationClass.workflow !== "string" || OperationClass.workflow === "")) {
       throw new TypeError(`QuBe Sync: ${OperationClass.name} needs a static workflow (the workflow it starts)`);
+    }
+    if (isRequest && (typeof OperationClass.operation !== "string" || OperationClass.operation === "")) {
+      throw new TypeError(`QuBe Sync: ${OperationClass.name} needs a static operation (the v2 operation it queues, such as "customer.query")`);
     }
     map.set(slug, OperationClass);
   }
@@ -124,6 +133,12 @@ const CHECKS = {
   enqueue: (value) => checkFunction("enqueue", value),
   jobAttempts(value) {
     if (!Number.isInteger(value) || value < 1) throw new TypeError(`QuBe Sync: jobAttempts is a whole number of 1 or more, in ${CONFIG_FILE}`);
+    return value;
+  },
+  pruneRunsAfter(value) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < DAY_MS) {
+      throw new TypeError(`QuBe Sync: pruneRunsAfter is null or milliseconds of a day or more (90 * 24 * 60 * 60 * 1000), in ${CONFIG_FILE}`);
+    }
     return value;
   },
   apiKey: (value) => checkString("apiKey", value),
@@ -252,6 +267,11 @@ class Settings {
     return values.jobAttempts || DEFAULT_JOB_ATTEMPTS;
   }
 
+  /** How long ended runs and requests are kept before pruneRuns() deletes them, in ms; null: never. */
+  get pruneRunsAfter() {
+    return values.pruneRunsAfter || null;
+  }
+
   get apiKey() {
     return values.apiKey || fromEnv("apiKey");
   }
@@ -274,8 +294,21 @@ class Settings {
     return values[key] !== undefined;
   }
 
-  /** The operation class for a slug, or null when none of your operations has it. */
+  /** The Operation class for a slug, or null when none of your operations has it. */
   operationClass(slug) {
+    const { Operation } = require("./operation");
+    const found = this.#bySlug(slug);
+    return found && found.prototype instanceof Operation ? found : null;
+  }
+
+  /** The PlainRequest class for a slug, or null when none of your operations has it. */
+  requestClass(slug) {
+    const { PlainRequest } = require("./request");
+    const found = this.#bySlug(slug);
+    return found && found.prototype instanceof PlainRequest ? found : null;
+  }
+
+  #bySlug(slug) {
     const operations = this.operations;
     return typeof slug === "string" && operations.has(slug) ? operations.get(slug) : null;
   }
@@ -288,6 +321,7 @@ class Settings {
       else if (key === "operations") described[key] = values.operations ? [...values.operations.keys()] : "[unset]";
       else if (key === "connectionEvents") described[key] = values.connectionEvents ? values.connectionEvents.name : "[unset]";
       else if (key === "jobAttempts") described[key] = this.jobAttempts;
+      else if (key === "pruneRunsAfter") described[key] = this.pruneRunsAfter;
       else if (key === "baseUrl" || key === "webhookUrl") {
         described[key] = values[key] || process.env[ENV[key]] || (key === "baseUrl" ? DEFAULT_BASE_URL : "[unset]");
       } else described[key] = values[key] ? "[set]" : "[default]";
@@ -346,6 +380,7 @@ module.exports = {
   CONFIG_FILE,
   SETTINGS: KEYS,
   DEFAULT_JOB_ATTEMPTS,
+  DAY_MS,
   Settings,
   configure,
   settings,

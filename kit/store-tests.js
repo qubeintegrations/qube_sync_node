@@ -7,8 +7,9 @@
 //   storeTests(async () => makeMyStore(await freshDatabase()));
 //
 // makeStore is called once per test and resolves to an empty store. Each check is about the
-// store's part (rows, keys, transactions, locks, notifications) and the kit's link rules on top
-// of it, so every store behaves alike. options.describe and options.it replace node:test's.
+// store's part (rows, keys, transactions, locks, notifications, request deliveries, sync marks,
+// disconnecting and pruning) and the kit's link rules on top of it, so every store behaves alike.
+// options.describe and options.it replace node:test's.
 // options.query(store, sql) resolves to the rows of a query on the store's database: with it, the
 // sync status SQL conditions are checked too (options.dialect, default "postgres").
 
@@ -58,6 +59,17 @@ function storeTests(makeStore, options) {
       reference: `ref-${Math.random().toString(36).slice(2)}`,
       state: "starting",
       revision: 0,
+      ...fields,
+    });
+  }
+
+  async function withRequest(store, connection, fields = {}) {
+    return store.createRequest({
+      connectionId: connection.id,
+      operation: "find_customer",
+      recordType: "Customer",
+      recordId: "7",
+      reference: `req-${Math.random().toString(36).slice(2)}`,
       ...fields,
     });
   }
@@ -273,19 +285,21 @@ function storeTests(makeStore, options) {
     for (const [name, lock] of [
       ["withRunLock", (store, row) => (fn) => store.withRunLock(row.run.id, fn)],
       ["withConnectionLock", (store, row) => (fn) => store.withConnectionLock(row.connection.id, fn)],
+      ["withRequestLock", (store, row) => (fn) => store.withRequestLock(row.request.id, fn)],
     ]) {
       it(`holds one ${name} at a time per row, and takes it again inside its own transaction`, async () => {
         const store = await makeStore();
         const connection = await withConnection(store);
         const run = await withRun(store, connection);
-        const locked = lock(store, { run, connection });
+        const request = await withRequest(store, connection);
+        const locked = lock(store, { run, connection, request });
         const order = [];
         const release = deferred();
         const first = locked(async (tx) => {
           order.push("first in");
           await release.promise;
           // Again, inside the transaction that holds it: no deadlock.
-          await lock(tx, { run, connection })(async () => order.push("first again"));
+          await lock(tx, { run, connection, request })(async () => order.push("first again"));
           order.push("first out");
         });
         await tick();
@@ -393,6 +407,235 @@ function storeTests(makeStore, options) {
       });
       await store.deleteQuickbooksRecord(made.id);
       assert.deepStrictEqual(await store.findQuickbooksRecords({ connectionId: connection.id, qbId: "80000001-1" }), []);
+    });
+  });
+
+  describe("store: plain requests", () => {
+    it("creates a row with its defaults, and keeps params and error as they were written", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const made = await withRequest(store, connection, { params: { full_name: "Riverbend é ✓", lines: [1, 2] } });
+      assert.strictEqual(made.state, "queued");
+      assert.strictEqual(made.pagesAnswered, 0);
+      for (const field of ["qubeId", "error", "lastPage", "endedAt"]) assert.strictEqual(made[field], null, field);
+      assert.ok(made.createdAt instanceof Date && made.updatedAt instanceof Date);
+      const endedAt = new Date("2026-10-27T12:00:00.000Z");
+      const error = { error_code: 3100, user_message: "Already in use" };
+      const updated = await store.updateRequest(made.id, { qubeId: "q-1", state: "error", error, pagesAnswered: 2, lastPage: 3, endedAt });
+      assert.strictEqual(updated.qubeId, "q-1");
+      const found = await store.getRequest(String(made.id));
+      assert.deepStrictEqual(found.params, { full_name: "Riverbend é ✓", lines: [1, 2] });
+      assert.deepStrictEqual(found.error, error);
+      assert.deepStrictEqual([found.state, found.pagesAnswered, found.lastPage], ["error", 2, 3]);
+      assert.strictEqual(found.endedAt.getTime(), endedAt.getTime());
+      assert.strictEqual(await store.updateRequest("999999999", { state: "error" }), null);
+      for (const id of ["0", "999999999", "abc", ""]) assert.strictEqual(await store.getRequest(id), null, `getRequest(${JSON.stringify(id)})`);
+    });
+
+    it("keeps reference unique", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      await withRequest(store, connection, { reference: "req-1" });
+      await rejectsConflict(() => withRequest(store, connection, { reference: "req-1" }));
+    });
+
+    it("finds a record's newest request of a slug, on one connection with connectionId", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const other = await withConnection(store, { ownerId: "2" });
+      const mine = await withRequest(store, connection);
+      await tick();
+      const theirs = await withRequest(store, other);
+      await withRequest(store, connection, { operation: "other_slug" });
+      await withRequest(store, connection, { recordId: "8" });
+      const on = (c) => store.latestRequest("Customer", "7", "find_customer", { connectionId: c.id });
+      assert.strictEqual(String((await on(connection)).id), String(mine.id));
+      assert.strictEqual(String((await on(other)).id), String(theirs.id));
+      assert.strictEqual(String((await store.latestRequest("Customer", "7", "find_customer")).id), String(theirs.id));
+      assert.strictEqual(await store.latestRequest("Customer", "9", "find_customer"), null);
+    });
+
+    it("takes a delivery once per request and key, and lists them in order", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const request = await withRequest(store, connection);
+      const other = await withRequest(store, connection);
+      assert.strictEqual(await store.takeRequestDelivery(request.id, "pr-1:response_received", { page: 1, state: "response_received" }), true);
+      assert.strictEqual(await store.takeRequestDelivery(request.id, "pr-1:response_received", { page: 1, state: "response_received" }), false);
+      assert.strictEqual(await store.takeRequestDelivery(request.id, "pr-1:retryable", { page: 1, state: "retryable" }), true);
+      assert.strictEqual(await store.takeRequestDelivery(request.id, "", { page: null, state: "error" }), true);
+      assert.strictEqual(await store.takeRequestDelivery(other.id, "pr-1:response_received", { page: 1, state: "response_received" }), true);
+      const listed = await store.findRequestDeliveries(String(request.id));
+      assert.deepStrictEqual(
+        listed.map((row) => [row.dedupeKey, row.page, row.state]),
+        [
+          ["pr-1:response_received", 1, "response_received"],
+          ["pr-1:retryable", 1, "retryable"],
+          ["", null, "error"],
+        ]
+      );
+    });
+
+    it("takes a delivery in the request lock's transaction: rolled back with it", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const request = await withRequest(store, connection);
+      await assert.rejects(
+        store.withRequestLock(request.id, async (tx, row) => {
+          assert.strictEqual(String(row.id), String(request.id));
+          await tx.takeRequestDelivery(request.id, "pr-1:response_received", { page: 1, state: "response_received" });
+          await tx.updateRequest(request.id, { state: "response_received" });
+          throw new Error("handler");
+        }),
+        /handler/
+      );
+      assert.deepStrictEqual(await store.findRequestDeliveries(request.id), []);
+      assert.strictEqual((await store.getRequest(request.id)).state, "queued");
+      assert.strictEqual(await store.withRequestLock("999999999", async (tx, row) => row), null);
+    });
+  });
+
+  describe("store: sync marks", () => {
+    it("advances a connection's mark for a workflow, never back, and keeps connections and workflows apart", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const other = await withConnection(store, { ownerId: "2" });
+      assert.strictEqual(await store.getSyncMark(connection.id, "pull_changes"), null);
+      const first = new Date("2026-10-27T10:00:00.000Z");
+      const later = new Date("2026-10-27T11:00:00.000Z");
+      await store.advanceSyncMark(connection.id, "pull_changes", first);
+      await store.advanceSyncMark(connection.id, "pull_changes", later);
+      await store.advanceSyncMark(connection.id, "pull_changes", first);
+      const mark = await store.getSyncMark(String(connection.id), "pull_changes");
+      assert.strictEqual(mark.startedAt.getTime(), later.getTime());
+      assert.strictEqual(mark.workflow, "pull_changes");
+      assert.strictEqual(await store.getSyncMark(other.id, "pull_changes"), null);
+      assert.strictEqual(await store.getSyncMark(connection.id, "add_transaction"), null);
+      await store.advanceSyncMark(other.id, "pull_changes", first);
+      assert.strictEqual((await store.getSyncMark(other.id, "pull_changes")).startedAt.getTime(), first.getTime());
+    });
+
+    it("advances inside a transaction, rolled back with it", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.advanceSyncMark(connection.id, "pull_changes", new Date());
+          throw new Error("boom");
+        }),
+        /boom/
+      );
+      assert.strictEqual(await store.getSyncMark(connection.id, "pull_changes"), null);
+    });
+  });
+
+  describe("store: disconnecting and pruning", () => {
+    it("says whether a connection has a run or request that hasn't ended", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const other = await withConnection(store, { ownerId: "2" });
+      const endedStates = ["completed", "failed", "cancelled"];
+      assert.strictEqual(await store.hasWorkGoing(connection.id, { endedStates }), false);
+      const run = await withRun(store, connection, { state: "running" });
+      await withRun(store, other, { state: "running" });
+      assert.strictEqual(await store.hasWorkGoing(connection.id, { endedStates }), true);
+      await store.updateRun(run.id, { state: "completed" });
+      assert.strictEqual(await store.hasWorkGoing(connection.id, { endedStates }), false);
+      const request = await withRequest(store, connection, { state: "retryable" });
+      assert.strictEqual(await store.hasWorkGoing(connection.id, { endedStates }), true);
+      await store.updateRequest(request.id, { state: "response_received", endedAt: new Date() });
+      assert.strictEqual(await store.hasWorkGoing(connection.id, { endedStates }), false);
+    });
+
+    it("deletes a connection with its runs, notifications, requests, deliveries, QuickBooks ids and sync marks, and nothing else", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store, { qubeId: "q-1" });
+      const other = await withConnection(store, { ownerId: "2" });
+      const run = await withRun(store, connection, { state: "completed" });
+      const kept = await withRun(store, other, { state: "completed" });
+      await store.once(run.id, "d-1", async () => {});
+      const request = await withRequest(store, connection);
+      const keptRequest = await withRequest(store, other);
+      await store.takeRequestDelivery(request.id, "pr-1:response_received", { page: 1, state: "response_received" });
+      await store.createQuickbooksRecord({ connectionId: connection.id, kind: "customer", list: "name", qbId: "Q1" });
+      await store.createQuickbooksRecord({ connectionId: other.id, kind: "customer", list: "name", qbId: "Q1" });
+      await store.advanceSyncMark(connection.id, "pull_changes", new Date());
+      await store.advanceSyncMark(other.id, "pull_changes", new Date());
+
+      await store.transaction((tx) => tx.deleteConnection(String(connection.id)));
+
+      assert.strictEqual(await store.getConnection(connection.id), null);
+      assert.strictEqual(await store.getRun(run.id), null);
+      assert.strictEqual(await store.getRequest(request.id), null);
+      assert.deepStrictEqual(await store.findRequestDeliveries(request.id), []);
+      assert.deepStrictEqual(await store.findQuickbooksRecords({ connectionId: connection.id }), []);
+      assert.strictEqual(await store.getSyncMark(connection.id, "pull_changes"), null);
+      assert.ok(await store.getConnection(other.id));
+      assert.ok(await store.getRun(kept.id));
+      assert.ok(await store.getRequest(keptRequest.id));
+      assert.strictEqual((await store.findQuickbooksRecords({ connectionId: other.id })).length, 1);
+      assert.ok(await store.getSyncMark(other.id, "pull_changes"));
+      // Its qubeId is free again.
+      await withConnection(store, { qubeId: "q-1" });
+    });
+
+    it("rolls a delete back with its transaction", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const run = await withRun(store, connection);
+      await assert.rejects(
+        store.transaction(async (tx) => {
+          await tx.deleteConnection(connection.id);
+          throw new Error("boom");
+        }),
+        /boom/
+      );
+      assert.ok(await store.getConnection(connection.id));
+      assert.ok(await store.getRun(run.id));
+    });
+
+    it("prunes runs in the given states ended (or, with no endedAt, last updated) before a time, a batch at a time", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const states = ["completed", "failed", "cancelled"];
+      const ended = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      const old1 = await withRun(store, connection, { state: "completed", endedAt: ended });
+      const old2 = await withRun(store, connection, { state: "cancelled", endedAt: ended });
+      await store.once(old1.id, "d-1", async () => {});
+      const noEnd = await withRun(store, connection, { state: "failed" }); // updated just now
+      const going = await withRun(store, connection, { state: "running", endedAt: ended });
+      const recent = await withRun(store, connection, { state: "completed", endedAt: new Date() });
+      const before = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+      assert.strictEqual(await store.pruneRuns({ states, before, limit: 1 }), 1);
+      assert.strictEqual(await store.pruneRuns({ states, before, limit: 500 }), 1);
+      assert.strictEqual(await store.pruneRuns({ states, before, limit: 500 }), 0);
+      assert.strictEqual(await store.getRun(old1.id), null);
+      assert.strictEqual(await store.getRun(old2.id), null);
+      for (const row of [noEnd, going, recent]) assert.ok(await store.getRun(row.id));
+      // Its notification went with it: the id is free.
+      assert.strictEqual(await store.once(old1.id, "d-1", async () => {}), true);
+      assert.strictEqual(await store.pruneRuns({ states, before: new Date(Date.now() + 60 * 1000), limit: 500 }), 2);
+      assert.strictEqual(await store.getRun(noEnd.id), null);
+    });
+
+    it("prunes requests ended before a time, with their deliveries, a batch at a time", async () => {
+      const store = await makeStore();
+      const connection = await withConnection(store);
+      const ended = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      const old1 = await withRequest(store, connection, { state: "response_received", endedAt: ended });
+      await withRequest(store, connection, { state: "error", endedAt: ended });
+      await store.takeRequestDelivery(old1.id, "pr-1:response_received", { page: 1, state: "response_received" });
+      const going = await withRequest(store, connection, { state: "retryable" });
+      const recent = await withRequest(store, connection, { state: "response_received", endedAt: new Date() });
+      const before = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+      assert.strictEqual(await store.pruneRequests({ before, limit: 1 }), 1);
+      assert.strictEqual(await store.pruneRequests({ before, limit: 500 }), 1);
+      assert.strictEqual(await store.getRequest(old1.id), null);
+      assert.deepStrictEqual(await store.findRequestDeliveries(old1.id), []);
+      assert.ok(await store.getRequest(going.id));
+      assert.ok(await store.getRequest(recent.id));
     });
   });
 

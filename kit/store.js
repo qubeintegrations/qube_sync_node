@@ -1,7 +1,8 @@
 "use strict";
 
 // The store: where the kit keeps your customers' connections, the runs your app starts, the
-// notifications each run's handler has taken and the QuickBooks ids your app learns. Node has no
+// notifications each run's handler has taken, the QuickBooks ids your app learns, each sync's
+// mark and any plain requests with the deliveries they've taken. Node has no
 // standard ORM, so the kit defines what a store does and your app's store does it (the
 // integration kit generates one for your database). memoryStore() is one, for tests, and
 // schema.sql the tables an SQL store keeps them in.
@@ -28,10 +29,24 @@ const STORE_METHODS = Object.freeze([
   "createQuickbooksRecord",
   "updateQuickbooksRecord",
   "deleteQuickbooksRecord",
+  "deleteConnection",
+  "hasWorkGoing",
+  "getSyncMark",
+  "advanceSyncMark",
+  "pruneRuns",
+  "pruneRequests",
+  "createRequest",
+  "getRequest",
+  "updateRequest",
+  "latestRequest",
+  "withRequestLock",
+  "takeRequestDelivery",
+  "findRequestDeliveries",
 ]);
 
 // Each table's columns, by the field a row has in JavaScript: the same tables as qube_rails'
-// migration (schema.sql has them). input, error, question and links are JSON, kept as text.
+// migrations (schema.sql has them). input, error, question, links and params are JSON, kept as
+// text.
 const STORE_COLUMNS = Object.freeze({
   qube_connections: Object.freeze({
     id: "id",
@@ -86,10 +101,43 @@ const STORE_COLUMNS = Object.freeze({
     createdAt: "created_at",
     updatedAt: "updated_at",
   }),
+  qube_sync_marks: Object.freeze({
+    id: "id",
+    connectionId: "connection_id",
+    workflow: "workflow",
+    startedAt: "started_at",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  }),
+  qube_requests: Object.freeze({
+    id: "id",
+    connectionId: "connection_id",
+    operation: "operation",
+    recordType: "record_type",
+    recordId: "record_id",
+    reference: "reference",
+    qubeId: "qube_id",
+    state: "state",
+    params: "params",
+    error: "error",
+    pagesAnswered: "pages_answered",
+    lastPage: "last_page",
+    endedAt: "ended_at",
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+  }),
+  qube_request_deliveries: Object.freeze({
+    id: "id",
+    requestId: "request_id",
+    dedupeKey: "dedupe_key",
+    page: "page",
+    state: "state",
+    createdAt: "created_at",
+  }),
 });
 
-// The run columns kept as JSON text.
-const JSON_COLUMNS = Object.freeze(["input", "error", "question", "links"]);
+// The columns kept as JSON text: a run's, and a request's params and error.
+const JSON_COLUMNS = Object.freeze(["input", "error", "question", "links", "params"]);
 
 const NAME_KINDS = Object.freeze(["customer", "vendor", "employee", "other_name"]);
 

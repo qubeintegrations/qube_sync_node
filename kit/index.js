@@ -13,10 +13,12 @@ const errors = require("./errors");
 const store = require("./store");
 const { memoryStore } = require("./memory-store");
 const { client, isNoAnswer } = require("./client");
-const { Connection, Run, recordKey } = require("./records");
+const { Connection, Run, QueuedRequest, recordKey } = require("./records");
 const { SyncStatus } = require("./sync-status");
 const { Operation } = require("./operation");
 const { ConnectionEvents } = require("./connection-events");
+const { PlainRequest } = require("./request");
+const { pruneRuns } = require("./prune");
 const job = require("./job");
 const onboarding = require("./onboarding");
 const questions = require("./questions");
@@ -32,6 +34,7 @@ module.exports = {
   SETTINGS: settingsModule.SETTINGS,
   CONFIG_FILE: settingsModule.CONFIG_FILE,
   DEFAULT_JOB_ATTEMPTS: settingsModule.DEFAULT_JOB_ATTEMPTS,
+  DAY_MS: settingsModule.DAY_MS,
   // Errors
   NotConfigured: errors.NotConfigured,
   UnknownOperation: errors.UnknownOperation,
@@ -52,11 +55,15 @@ module.exports = {
   // Rows
   Connection,
   Run,
+  QueuedRequest,
   recordKey,
   SyncStatus,
   // Bases
   Operation,
   ConnectionEvents,
+  PlainRequest,
+  // Pruning
+  pruneRuns,
   // The webhook endpoint and the job
   receiveWebhook: job.receiveWebhook,
   run: job.run,
@@ -67,6 +74,9 @@ module.exports = {
   // Onboarding
   connectQuickbooks: onboarding.connectQuickbooks,
   resendOnboarding: onboarding.resendOnboarding,
+  disconnectQuickbooks: onboarding.disconnectQuickbooks,
+  RUNS_GOING: onboarding.RUNS_GOING,
+  DISCONNECT_NO_ANSWER: onboarding.DISCONNECT_NO_ANSWER,
   // Questions, the start retry and the redelivery
   QUESTION_CHANGED: questions.QUESTION_CHANGED,
   NOT_STARTING: questions.NOT_STARTING,

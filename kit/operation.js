@@ -188,6 +188,11 @@ class Operation {
     return this.run ? this.run.store : settings().store;
   }
 
+  /** When this connection's last completed run of the workflow started, or null: a sync's since. */
+  async lastSyncedAt() {
+    return this.connection.lastSyncedAt(this.constructor.workflow);
+  }
+
   // The run's input, from the record. Each operation says how. It may return the input builder
   // `npx qubesync workflows` generates for its workflow, typed as <Workflow><Branch>Input
   // (addTransaction.invoiceInput(params, { adds }) is an AddTransactionInvoiceInput, from
@@ -297,12 +302,13 @@ class Operation {
   }
 
   // After your user's choice is in: the question is forgotten, unless the run has asked another
-  // since (its token is the question's own).
-  async answered(token) {
+  // since (its token is the question's own). taken: QuBe Sync took the answer, so the run is
+  // running again until its next webhook (which waits on the Web Connector's next poll).
+  async answered(token, { taken = false } = {}) {
     const row = await this.run.store.withRunLock(this.run.id, (tx, locked) => {
       const question = locked ? new Run(locked).openQuestion() : null;
       if (!question || question.token !== token) return locked;
-      return tx.updateRun(locked.id, { question: null, links: null });
+      return tx.updateRun(locked.id, { question: null, links: null, ...(taken ? { state: "running" } : {}) });
     });
     if (row) Object.assign(this.run, row);
   }
@@ -362,6 +368,7 @@ class Operation {
     if (asking) {
       await this.question(event);
     } else if (event.event === "workflow_run.completed") {
+      await tx.advanceSyncMark(run.connectionId, this.constructor.workflow, run.createdAt);
       await this.ended(event);
     } else if (Operation.#stopped(event)) {
       await this.failed(event);

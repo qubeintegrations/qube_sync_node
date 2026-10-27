@@ -5,14 +5,14 @@
 
 const { SignatureError, parse, verify } = require("../index");
 const { UnknownOperation } = require("./errors");
-const { Connection, Run } = require("./records");
+const { Connection, QueuedRequest, Run } = require("./records");
 const { settings } = require("./settings");
 
 // The largest body taken: a pull_changes page can be a few megabytes. Anything larger is answered
 // 413 before it's read.
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 
-const KINDS = Object.freeze(["run", "connection"]);
+const KINDS = Object.freeze(["run", "connection", "request"]);
 
 // What to check for each reason a signature is refused, for the developer reading the log.
 const SIGNATURE_HINTS = Object.freeze({
@@ -25,8 +25,9 @@ const SIGNATURE_HINTS = Object.freeze({
 
 /**
  * Receives one QuBe Sync webhook: kind "run" at QUBE_WEBHOOK_URL/runs/<run id>, the URL each run
- * was started with (Run#webhookUrl), or kind "connection" at QUBE_WEBHOOK_URL/connections/<id>,
- * each connection's (Connection#webhookUrl). It only verifies the delivery, checks the row is
+ * was started with (Run#webhookUrl), kind "connection" at QUBE_WEBHOOK_URL/connections/<id>,
+ * each connection's (Connection#webhookUrl), or kind "request" at QUBE_WEBHOOK_URL/requests/<id>,
+ * each plain request's (QueuedRequest#webhookUrl). It only verifies the delivery, checks the row is
  * there and enqueues it (the enqueue setting), so it answers well inside the 5 seconds QuBe Sync
  * waits: the job does the rest. Resolves to the status to answer with: 200, 400, 401, 404, 413 or
  * 503.
@@ -40,7 +41,7 @@ async function receiveWebhook({ kind, id, body, signature, path }) {
       "QuBe Sync: the webhook's body was already parsed, so there's nothing left to verify. Give the webhook route the raw body: mount it before any JSON body parser (express.json())."
     );
   }
-  if (!KINDS.includes(kind)) throw new TypeError(`QuBe Sync: a delivery is for a run or a connection, not ${JSON.stringify(kind)}`);
+  if (!KINDS.includes(kind)) throw new TypeError(`QuBe Sync: a delivery is for a run, a connection or a request, not ${JSON.stringify(kind)}`);
   const raw = body === undefined || body === null ? Buffer.alloc(0) : Buffer.from(body);
   if (raw.length > MAX_BODY_BYTES) {
     console.warn(`QuBe Sync: refused a webhook: its body is over ${MAX_BODY_BYTES} bytes`);
@@ -68,15 +69,21 @@ async function receiveWebhook({ kind, id, body, signature, path }) {
   // A row that isn't there (deleted, or a wrong webhook URL): QuBe Sync retries it, and shows it
   // as a failed delivery.
   const rowId = String(id);
-  const row = kind === "run" ? await current.store.getRun(rowId) : await current.store.getConnection(rowId);
+  const row = await findRow(current.store, kind, rowId);
   if (!row) return { status: 404 };
 
   // The signature covers the body, not the URL, so the id is only a pointer: the job checks the
-  // event's reference and connection id against the row. The body goes as text, which any queue
+  // event's reference and connection id (a request's event, its id) against the row. The body goes as text, which any queue
   // can carry; the job parses it again. A 200 tells QuBe Sync it's taken and it won't send it
   // again, so a queue that didn't take it answers 503 and QuBe Sync retries.
   const enqueued = await isEnqueued(current, { kind, id: rowId, body: raw.toString("utf8") });
   return { status: enqueued ? 200 : 503 };
+}
+
+function findRow(store, kind, id) {
+  if (kind === "run") return store.getRun(id);
+  if (kind === "request") return store.getRequest(id);
+  return store.getConnection(id);
 }
 
 // A body a JSON parser has read already: an object, not the bytes the signature is over.
@@ -109,7 +116,8 @@ async function isEnqueued(current, delivery) {
  * Runs one verified delivery, once. kind is "run" (QUBE_WEBHOOK_URL/runs/<id>): the run's
  * operation finds its record and handles the event (Operation#handle); or "connection"
  * (QUBE_WEBHOOK_URL/connections/<id>): your connectionEvents class handles it for that
- * connection. job() calls it; so does your own queue's worker when the enqueue setting hands
+ * connection; or "request" (QUBE_WEBHOOK_URL/requests/<id>): the request's PlainRequest class
+ * handles it (PlainRequest#handle). job() calls it; so does your own queue's worker when the enqueue setting hands
  * deliveries elsewhere.
  *
  * body is the delivery's raw body, which the endpoint verified: parsed into its typed event here,
@@ -129,8 +137,10 @@ async function run({ kind, id, body }) {
       return runEvent(String(id), event);
     case "connection":
       return connectionEvent(String(id), event);
+    case "request":
+      return requestEvent(String(id), event);
     default:
-      throw new TypeError(`QuBe Sync: a delivery is for a run or a connection, not ${JSON.stringify(kind)}`);
+      throw new TypeError(`QuBe Sync: a delivery is for a run, a connection or a request, not ${JSON.stringify(kind)}`);
   }
 }
 
@@ -145,6 +155,19 @@ async function runEvent(id, event) {
   if (record === null) return dropped(`run ${found.id}'s ${found.recordType} ${found.recordId} isn't there`, event);
 
   return new OperationClass(record, found).handle(event);
+}
+
+async function requestEvent(id, event) {
+  const found = await QueuedRequest.get(id);
+  if (!found) return dropped(`request ${id} isn't there`, event);
+
+  const RequestClass = settings().requestClass(found.operation);
+  if (!RequestClass) throw new UnknownOperation(`QuBe Sync: no operation has the slug ${JSON.stringify(found.operation)}`);
+
+  const record = await RequestClass.recordFor(found);
+  if (record === null) return dropped(`request ${found.id}'s ${found.recordType} ${found.recordId} isn't there`, event);
+
+  return new RequestClass(record, found).handle(event);
 }
 
 async function connectionEvent(id, event) {

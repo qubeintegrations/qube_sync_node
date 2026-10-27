@@ -12,7 +12,7 @@ export interface QuestionsOptions {
 }
 
 /**
- * POST /webhooks/qube/runs/:id and POST /webhooks/qube/connections/:id: verify (401), find the row
+ * POST /webhooks/qube/runs/:id, /webhooks/qube/connections/:id and /webhooks/qube/requests/:id: verify (401), find the row
  * (404), enqueue (200, or 503 when the enqueue didn't take it); up to 5 MB (413). Mount it before
  * express.json().
  */
@@ -20,8 +20,9 @@ export declare function webhooks(options?: SettingsOptions | Settings): Router;
 
 /**
  * POST /quickbooks/connections (name, new=1, simulated=1 outside production) and POST /quickbooks/connections/:id/onboarding: 303
- * to the setup, 401 with no signed-in account, 404 for another account's connection. Mount it
- * behind your sign-in.
+ * to the setup, 401 with no signed-in account, 404 for another account's connection. DELETE /quickbooks/connections/:id
+ * (and POST .../:id/disconnect, for an HTML form) disconnects one, going back (303) with a message while a run or request
+ * hasn't ended. Mount it behind your sign-in.
  */
 export declare function connect(options?: SettingsOptions | Settings): Router;
 

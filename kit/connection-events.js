@@ -100,6 +100,10 @@ class ConnectionEvents {
     this.logEvent(event);
   }
 
+  // The account disconnected it (disconnectQuickbooks): delete your rows that point at it,
+  // through this.store. Runs in the transaction that deletes it, before its runs and links go.
+  async disconnected() {}
+
   // All a handler does until you fill it in.
   logEvent(event) {
     const body = event.body || {};

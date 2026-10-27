@@ -138,11 +138,31 @@ describe("express: webhooks", () => {
     assert.deepStrictEqual(deliveries.map((d) => [d.kind, d.id]), [["connection", String(connection.id)], ["connection", String(waiting.id)]]);
   });
 
+  it("POST /webhooks/qube/requests/:id verifies a plain request's delivery, enqueues it and answers 200", async () => {
+    const deliveries = [];
+    reset({ enqueue: (delivery) => deliveries.push(delivery) });
+    const account = tables.Account.add();
+    const connection = await makeConnection(account);
+    const customer = tables.Customer.add({ name: "Northwind Builders" });
+    const row = await kit.settings().store.createRequest({
+      connectionId: connection.id,
+      operation: "find_customer",
+      recordType: "Customer",
+      recordId: String(customer.id),
+      reference: "find_customer-1-1",
+    });
+    const body = vectorBody("request: a page of a paginated query");
+    const res = await request(app(), signedPost(`/webhooks/qube/requests/${row.id}`, body));
+    assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(deliveries, [{ kind: "request", id: String(row.id), body }]);
+    assert.strictEqual((await request(app(), signedPost(`/webhooks/qube/requests/${row.id}`, body, { "X-Qube-Signature": "t=1,v1=00" }))).status, 401);
+  });
+
   it("answers 404 for a row that isn't there, once the signature checks out, and checks the signature first", async () => {
     const deliveries = [];
     reset({ enqueue: (delivery) => deliveries.push(delivery) });
     const body = vectorBody("workflow_run.completed");
-    for (const path of ["/webhooks/qube/runs/999", "/webhooks/qube/runs/abc", "/webhooks/qube/connections/999"]) {
+    for (const path of ["/webhooks/qube/runs/999", "/webhooks/qube/runs/abc", "/webhooks/qube/connections/999", "/webhooks/qube/requests/999"]) {
       assert.strictEqual((await request(app(), signedPost(path, body))).status, 404, path);
       assert.strictEqual((await request(app(), signedPost(path, body, { "X-Qube-Signature": "t=1,v1=00" }))).status, 401, path);
     }
@@ -396,6 +416,57 @@ describe("express: connect", () => {
   });
 });
 
+describe("express: disconnect", () => {
+  it("DELETE /quickbooks/connections/:id deletes QuBe Sync's connection, then the row, and goes back", async () => {
+    reset();
+    const { account, connection, run } = await fixtures();
+    await run.update({ state: "completed" });
+    answer({ status: 204 });
+    const res = await request(app(), { method: "DELETE", path: `/quickbooks/connections/${connection.id}`, headers: { "X-Test-Account": String(account.id), Referer: "/settings" } });
+    assert.strictEqual(res.status, 303);
+    assert.strictEqual(res.headers.location, "/settings");
+    assert.deepStrictEqual([fake.received[0].method, fake.received[0].path], ["DELETE", `/api/v2/connections/${CONN}`]);
+    assert.strictEqual(await kit.Connection.get(connection.id), null);
+    assert.strictEqual(await kit.Run.get(run.id), null);
+  });
+
+  it("POST /quickbooks/connections/:id/disconnect does the same, for an HTML form", async () => {
+    reset();
+    const { account, connection, run } = await fixtures();
+    await run.update({ state: "failed" });
+    answer({ status: 204 });
+    const res = await request(app(), form(`/quickbooks/connections/${connection.id}/disconnect`, {}, account));
+    assert.strictEqual(res.status, 303);
+    assert.strictEqual(await kit.Connection.get(connection.id), null);
+  });
+
+  it("goes back saying why while a run hasn't ended, or when QuBe Sync doesn't answer", async () => {
+    reset();
+    const { account, connection, run } = await fixtures();
+    let res = await request(app(), form(`/quickbooks/connections/${connection.id}/disconnect`, {}, account));
+    assertBackWith(res, kit.RUNS_GOING);
+    assert.strictEqual(fake.received.length, 0);
+    await run.update({ state: "completed" });
+    answer({ destroy: true });
+    res = await request(app(), form(`/quickbooks/connections/${connection.id}/disconnect`, {}, account));
+    assertBackWith(res, kit.DISCONNECT_NO_ANSWER);
+    assert.ok(await kit.Connection.get(connection.id));
+  });
+
+  it("answers 404 for another account's connection, and is behind the app's sign-in", async () => {
+    reset();
+    const { connection } = await fixtures();
+    const other = tables.Account.add();
+    for (const id of [connection.id, 999, "abc"]) {
+      const res = await request(app(), { method: "DELETE", path: `/quickbooks/connections/${id}`, headers: { "X-Test-Account": String(other.id) } });
+      assert.strictEqual(res.status, 404, String(id));
+    }
+    assert.strictEqual((await request(app(), { method: "DELETE", path: `/quickbooks/connections/${connection.id}` })).status, 401);
+    assert.strictEqual(fake.received.length, 0);
+    assert.ok(await kit.Connection.get(connection.id));
+  });
+});
+
 describe("express: questions", () => {
   const question = {
     token: "tok",
@@ -444,7 +515,11 @@ describe("express: questions", () => {
     assert.strictEqual(res.headers.location, `/invoices/${run.recordId}`);
     assert.deepStrictEqual(fake.received[0].body, { choice: "add", data: { name: "Lone Star", count: 3, rate: 1.5, taxable: true } });
     assert.strictEqual(fake.received[0].query.prompt_token, "tok");
-    assert.strictEqual((await reload(run)).question, null);
+    const after = await reload(run);
+    assert.strictEqual(after.question, null);
+    // Running again at once, not waiting on an answer until the Web Connector next polls.
+    assert.strictEqual(after.state, "running");
+    assert.strictEqual((await kit.SyncStatus.latest(tables.Invoice.find(run.recordId), "create_invoice")).status, "sending");
   });
 
   it("sends an unticked checkbox as false, and a number it can't read as typed", async () => {
@@ -473,7 +548,9 @@ describe("express: questions", () => {
       answer(refusal);
       const res = await request(app(), answerForm(run, { choice: "use:1" }, account));
       assertBackWith(res, kit.QUESTION_CHANGED);
-      assert.strictEqual((await reload(run)).question, null);
+      const after = await reload(run);
+      assert.strictEqual(after.question, null);
+      assert.strictEqual(after.state, "awaiting_input"); // a changed question leaves the state alone
     }
   });
 

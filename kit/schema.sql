@@ -1,7 +1,8 @@
 -- QuBe Sync's tables (qubesync/kit): your customers' connections, the runs your app starts, the
--- notifications each run's handler has taken, and the QuickBooks ids your app learns, each against
--- its connection. Your own tables need nothing. The same tables as qube_rails' migration, so an
--- app moving between the two keeps its data.
+-- notifications each run's handler has taken, the QuickBooks ids your app learns, each sync's mark,
+-- and any plain requests with the deliveries they've taken, each against its connection. Your own
+-- tables need nothing. The same tables as qube_rails' migrations, so an app moving between the two
+-- keeps its data.
 --
 -- PostgreSQL as written. For MySQL: `bigint NOT NULL AUTO_INCREMENT PRIMARY KEY` for each id,
 -- `varchar(255)` where a column says `varchar` with no length, `datetime(6)` for `timestamp`, and
@@ -12,15 +13,15 @@
 --
 -- The polymorphic ids (owner_id, record_id) are strings, so integer and UUID keys both fit.
 -- input (what the run was started with, so a start can be resent unchanged), error (a failed
--- run's, as its event carried it), question and links are JSON kept as text: JSON.stringify on
--- the way in and JSON.parse on the way out, the same on every database, since nothing queries
--- inside them. The 100-character limits keep the composite indexes inside MySQL's 3072-byte key
+-- run's, as its event carried it), question, links and a request's params are JSON kept as
+-- text: JSON.stringify on the way in and JSON.parse on the way out, the same on every database,
+-- since nothing queries inside them. The 100-character limits keep the composite indexes inside MySQL's 3072-byte key
 -- limit under utf8mb4.
 --
--- A store's locks (withRunLock, withConnectionLock) are a row lock in a transaction. On
--- PostgreSQL take it with `SELECT ... FOR NO KEY UPDATE`: plain FOR UPDATE also blocks the
--- foreign-key check of a run or QuickBooks id inserted against that connection from another
--- transaction.
+-- A store's locks (withRunLock, withConnectionLock, withRequestLock) are a row lock in a
+-- transaction. On PostgreSQL take it with `SELECT ... FOR NO KEY UPDATE`: plain FOR UPDATE also
+-- blocks the foreign-key check of a run or QuickBooks id inserted against that connection from
+-- another transaction.
 
 CREATE TABLE qube_connections (
   id bigserial PRIMARY KEY,
@@ -97,3 +98,50 @@ CREATE UNIQUE INDEX index_qube_quickbooks_records_on_qb_id ON qube_quickbooks_re
 CREATE UNIQUE INDEX index_qube_quickbooks_records_on_record ON qube_quickbooks_records (connection_id, kind, record_type, record_id);
 -- A record's links on a connection whatever their kind: sync status, inQuickbooksSql.
 CREATE INDEX index_qube_quickbooks_records_on_connection_and_record ON qube_quickbooks_records (connection_id, record_type, record_id);
+
+-- When each connection's last completed run of a workflow started: a sync's next since
+-- (lastSyncedAt), kept apart from qube_runs so pruning runs never loses it.
+CREATE TABLE qube_sync_marks (
+  id bigserial PRIMARY KEY,
+  connection_id bigint NOT NULL,
+  workflow varchar(100) NOT NULL,
+  started_at timestamp NOT NULL,
+  created_at timestamp NOT NULL,
+  updated_at timestamp NOT NULL,
+  CONSTRAINT fk_qube_sync_marks_connection_id FOREIGN KEY (connection_id) REFERENCES qube_connections (id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX index_qube_sync_marks_on_connection_and_workflow ON qube_sync_marks (connection_id, workflow);
+
+-- Plain v2 requests your app queues (PlainRequest), and the deliveries each has taken, by
+-- page_request_id:state, written in the handler's transaction. Never a response body.
+CREATE TABLE qube_requests (
+  id bigserial PRIMARY KEY,
+  connection_id bigint NOT NULL,
+  operation varchar(100) NOT NULL,
+  record_type varchar(100) NOT NULL,
+  record_id varchar NOT NULL,
+  reference varchar NOT NULL,
+  qube_id varchar,
+  state varchar(50) NOT NULL DEFAULT 'queued',
+  params text,
+  error text,
+  pages_answered integer NOT NULL DEFAULT 0,
+  last_page integer,
+  ended_at timestamp,
+  created_at timestamp NOT NULL,
+  updated_at timestamp NOT NULL,
+  CONSTRAINT fk_qube_requests_connection_id FOREIGN KEY (connection_id) REFERENCES qube_connections (id)
+);
+CREATE UNIQUE INDEX index_qube_requests_on_reference ON qube_requests (reference);
+CREATE INDEX index_qube_requests_on_connection_and_record ON qube_requests (connection_id, record_type, record_id, operation, created_at);
+
+CREATE TABLE qube_request_deliveries (
+  id bigserial PRIMARY KEY,
+  request_id bigint NOT NULL,
+  dedupe_key varchar(200) NOT NULL,
+  page integer,
+  state varchar(50) NOT NULL,
+  created_at timestamp NOT NULL,
+  CONSTRAINT fk_qube_request_deliveries_request_id FOREIGN KEY (request_id) REFERENCES qube_requests (id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX index_qube_request_deliveries_on_request_and_key ON qube_request_deliveries (request_id, dedupe_key);

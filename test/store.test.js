@@ -44,10 +44,16 @@ describe("schema.sql", () => {
       "UNIQUE INDEX index_qube_quickbooks_records_on_record ON qube_quickbooks_records (connection_id, kind, record_type, record_id)",
       "INDEX index_qube_quickbooks_records_on_connection_and_record ON qube_quickbooks_records (connection_id, record_type, record_id)",
       "INDEX index_qube_runs_on_connection_record_and_state ON qube_runs (connection_id, record_type, record_id, operation, state)",
+      "UNIQUE INDEX index_qube_sync_marks_on_connection_and_workflow ON qube_sync_marks (connection_id, workflow)",
+      "UNIQUE INDEX index_qube_requests_on_reference ON qube_requests (reference)",
+      "INDEX index_qube_requests_on_connection_and_record ON qube_requests (connection_id, record_type, record_id, operation, created_at)",
+      "UNIQUE INDEX index_qube_request_deliveries_on_request_and_key ON qube_request_deliveries (request_id, dedupe_key)",
     ]) {
       assert.ok(sql.includes(`CREATE ${index};`), index);
     }
     assert.ok(sql.includes("FOREIGN KEY (run_id) REFERENCES qube_runs (id) ON DELETE CASCADE"));
+    assert.ok(sql.includes("FOREIGN KEY (connection_id) REFERENCES qube_connections (id) ON DELETE CASCADE"), "qube_sync_marks");
+    assert.ok(sql.includes("FOREIGN KEY (request_id) REFERENCES qube_requests (id) ON DELETE CASCADE"));
   });
 });
 

@@ -9,8 +9,9 @@
 // (Connection), owned by the signed-in account (the currentAccount setting). Both routes go
 // behind your sign-in.
 
-const { client } = require("./client");
-const { Connection, blank, recordKey } = require("./records");
+const { APIError } = require("../client");
+const { client, isNoAnswer } = require("./client");
+const { Connection, Run, blank, recordKey } = require("./records");
 const { settings } = require("./settings");
 
 // The statuses of a connection that has never connected.
@@ -64,6 +65,44 @@ async function resendOnboarding({ request, id } = {}) {
   return sendToSetup(connection);
 }
 
+const RUNS_GOING = "It has a run or request that hasn't ended: wait for it, or answer its question, first.";
+const DISCONNECT_NO_ANSWER = "QuBe Sync didn't answer: try disconnecting again in a minute.";
+
+/**
+ * DELETE quickbooks/connections/:id: disconnects one of the signed-in account's connections.
+ * QuBe Sync deletes its connection (already gone counts), then connection.disconnect() deletes the
+ * row with its runs, requests, QuickBooks ids and sync marks. Resolves to { status: 303 } (back to
+ * the page), { status: 303, error } (RUNS_GOING while a run or request hasn't ended;
+ * DISCONNECT_NO_ANSWER), { status: 401 }, or { status: 404 } for another account's connection.
+ */
+async function disconnectQuickbooks({ request, id } = {}) {
+  const account = await signedInAccount(request, "a disconnect");
+  if (!account) return { status: 401 };
+
+  const connection = await Connection.get(String(id));
+  if (!connection || !isOwnedBy(connection, account)) return { status: 404 };
+  if (await connection.store.hasWorkGoing(connection.id, { endedStates: Run.ENDED_STATES })) return { status: 303, error: RUNS_GOING };
+
+  try {
+    await deleteOnQube(connection);
+  } catch (err) {
+    if (isNoAnswer(err)) return { status: 303, error: DISCONNECT_NO_ANSWER };
+    throw err;
+  }
+  await connection.disconnect();
+  return { status: 303 };
+}
+
+// Already gone there (404) is gone.
+async function deleteOnQube(connection) {
+  if (blank(connection.qubeId)) return;
+  try {
+    await client().deleteConnection(connection.qubeId);
+  } catch (err) {
+    if (!(err instanceof APIError && err.status === 404)) throw err;
+  }
+}
+
 // Never in production: a customer's user can't connect a fake company file.
 async function connectSimulated(account, name) {
   if (process.env.NODE_ENV === "production") return { status: 404 };
@@ -111,4 +150,4 @@ async function sendToSetup(connection, { fresh = false } = {}) {
   return { status: 303, location: made.links.onboarding };
 }
 
-module.exports = { connectQuickbooks, resendOnboarding };
+module.exports = { connectQuickbooks, resendOnboarding, disconnectQuickbooks, RUNS_GOING, DISCONNECT_NO_ANSWER };

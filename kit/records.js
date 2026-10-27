@@ -1,7 +1,7 @@
 "use strict";
 
-// The kit's rows, with what they mean: Connection (qube_connections) and Run (qube_runs), each a
-// row from the store with its methods. QuickBooks ids are kept through a connection (link,
+// The kit's rows, with what they mean: Connection (qube_connections), Run (qube_runs) and
+// QueuedRequest (qube_requests), each a row from the store with its methods. QuickBooks ids are kept through a connection (link,
 // qbIdFor, findLinked, quickbooksRecord) as plain rows of qube_quickbooks_records.
 
 const { client } = require("./client");
@@ -127,6 +127,23 @@ class Connection {
     const [type, id] = recordKey(record);
     const row = await this.store.latestRun(type, id, String(operation), { connectionId: this.id });
     return row ? new Run(row, this.store, this) : null;
+  }
+
+  /** When its last completed run of workflow started, or null before one: a sync's next since. */
+  async lastSyncedAt(workflow) {
+    const mark = await this.store.getSyncMark(this.id, String(workflow));
+    return mark ? toDate(mark.startedAt) : null;
+  }
+
+  // Deletes the row with its runs, requests, QuickBooks ids and sync marks, after your
+  // connectionEvents class's disconnected(), all in one transaction. disconnectQuickbooks deletes
+  // QuBe Sync's connection first.
+  async disconnect() {
+    await this.store.transaction(async (tx) => {
+      const Events = settings().connectionEvents;
+      await new Events(new Connection({ ...this }, tx)).disconnected();
+      await tx.deleteConnection(this.id);
+    });
   }
 
   /** Where record stands with QuickBooks here for operation: a SyncStatus, never stored. */
@@ -485,4 +502,60 @@ Run.UNCONFIRMED_AFTER_SECONDS = 60;
 // How long a confirmed run may go without news before the status offers to resend its latest event.
 Run.QUIET_AFTER_SECONDS = 10 * 60;
 
-module.exports = { Connection, Run, recordKey, blank, toDate };
+// ---------------------------------------------------------------------------
+
+// One plain v2 request (PlainRequest.queue) for one of your records, on one connection. Written
+// before it's sent; its webhook URL is QUBE_WEBHOOK_URL/requests/<id>.
+//
+// state: "queued", "retryable", "response_received", "error", "timed_out", "discarded", or
+// "failed" (QuBe Sync refused the queue, or params threw). endedAt is set once it's over: every
+// page answered, or a final error. It never keeps a response body.
+class QueuedRequest {
+  constructor(row, store, connection) {
+    Object.assign(this, row);
+    hidden(this, "store", store || settings().store);
+    hidden(this, "connection", connection || null);
+    // Set by PlainRequest.queue when it returned this row rather than queueing another. Not saved.
+    hidden(this, "reused", false);
+  }
+
+  static async get(id, store) {
+    const using = store || settings().store;
+    const row = await using.getRequest(id);
+    return row ? QueuedRequest.load(row, using) : null;
+  }
+
+  static async load(row, store) {
+    const using = store || settings().store;
+    const connection = await using.getConnection(row.connectionId);
+    return new QueuedRequest(row, using, connection ? new Connection(connection, using) : null);
+  }
+
+  async update(changes) {
+    const row = await this.store.updateRequest(this.id, changes);
+    if (row) Object.assign(this, row);
+    return this;
+  }
+
+  webhookUrl() {
+    return `${settings().webhookUrl}/requests/${encodeURIComponent(String(this.id))}`;
+  }
+
+  ended() {
+    return !blank(this.endedAt);
+  }
+
+  /** Every page answered. */
+  done() {
+    return this.ended() && this.state === "response_received";
+  }
+
+  // Sends a queue QuBe Sync never confirmed again: same params and Idempotency-Key.
+  async retryQueue() {
+    const RequestClass = settings().requestClass(this.operation);
+    if (!RequestClass) throw new UnknownOperation(`QuBe Sync: no operation has the slug ${JSON.stringify(this.operation)}`);
+    return RequestClass.retryQueue(this);
+  }
+}
+
+module.exports = { Connection, Run, QueuedRequest, recordKey, blank, toDate };

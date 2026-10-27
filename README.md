@@ -390,18 +390,18 @@ app.post("/webhooks/qube", express.raw({ type: "application/json" }), (req, res)
 Everything an Express app's QuBe Sync integration has that's the same in every app:
 
 - tables of its own, kept through your app's **store**: your customers' **connections** (an
-  account can have several, one per company file), the **runs** your app starts, the
-  notifications each run has taken, and the **QuickBooks ids** it learns, each kept against its
-  connection;
-- onboarding: make a connection for the signed-in account, or send one of its connections back
-  through QuBe Sync's setup;
+  account can have several, one per company file), the **runs** your app starts (and any
+  [plain **requests**](#plain-requests)), the notifications each run has taken, the **QuickBooks
+  ids** it learns and each sync's mark, each kept against its connection;
+- onboarding: make a connection for the signed-in account, send one of its connections back
+  through QuBe Sync's setup, or disconnect one;
 - the webhook endpoint (verify the signature, find the row, enqueue) and its job (check the event
   is that run's or that connection's, apply it, call your handler);
 - the question routes (answer by choice, search a record field), a start sent again, a stuck
   run's latest event sent again, and their HTML;
 - each record's [sync status](#sync-status), worked out from those tables, and SQL conditions for
   list pages;
-- `Operation` and `ConnectionEvents`, the bases of your classes.
+- `Operation`, `PlainRequest` and `ConnectionEvents`, the bases of your classes.
 
 Your app keeps its own code, which this package never names, in `quickbooks-desktop/`: one config
 file, a store, an operation class per way it starts a workflow, and a class for a connection's
@@ -426,9 +426,10 @@ between records, the item family's fallback, a notification taken once) is the k
 store, so every store behaves alike.
 
 The tables are `qubesync/kit/schema.sql` (PostgreSQL, with notes for MySQL and SQLite):
-`qube_connections`, `qube_runs`, `qube_notifications` and `qube_quickbooks_records`, the same as
-qube_rails' migration. Rows are camelCase in JavaScript (`STORE_COLUMNS` maps each field to its
-column); `input`, `error`, `question` and `links` are JSON kept as text; times are `Date`s.
+`qube_connections`, `qube_runs`, `qube_notifications`, `qube_quickbooks_records`,
+`qube_sync_marks`, `qube_requests` and `qube_request_deliveries`, the same as qube_rails'
+migrations. Rows are camelCase in JavaScript (`STORE_COLUMNS` maps each field to its column);
+`input`, `error`, `question`, `links` and `params` are JSON kept as text; times are `Date`s.
 
 | Method | What it does |
 | --- | --- |
@@ -442,6 +443,17 @@ column); `input`, `error`, `question` and `links` are JSON kept as text; times a
 | `once(runId, deliveryId, fn)` | runs `fn` unless the run has taken that delivery id (`qube_notifications`), in the same transaction, and answers whether it ran |
 | `findQuickbooksRecords(where, { limit, lock })` | `qube_quickbooks_records` rows by `connectionId` and any of `kind`, `list`, `qbId`, `recordType`, `recordId`, in id order |
 | `createQuickbooksRecord(fields)` / `updateQuickbooksRecord(id, changes)` / `deleteQuickbooksRecord(id)` | |
+| `deleteConnection(id)` | deletes the connection's runs (their notifications cascade), requests (their deliveries cascade), QuickBooks ids and sync marks, then the row; the kit calls it in a transaction |
+| `hasWorkGoing(connectionId, { endedStates })` | whether the connection has a run whose `state` isn't one of `endedStates`, or a request with no `endedAt` |
+| `getSyncMark(connectionId, workflow)` | the `qube_sync_marks` row, or `null` |
+| `advanceSyncMark(connectionId, workflow, startedAt)` | writes the mark, or moves it to `startedAt` when that's later: never back (`INSERT ... ON CONFLICT (connection_id, workflow) DO UPDATE ... WHERE started_at < EXCLUDED.started_at`) |
+| `pruneRuns({ states, before, limit })` | deletes up to `limit` runs in `states` whose `COALESCE(ended_at, updated_at)` is before `before`, and answers how many |
+| `pruneRequests({ before, limit })` | deletes up to `limit` requests whose `ended_at` is before `before`, and answers how many |
+| `createRequest(fields)` / `getRequest(id)` / `updateRequest(id, changes)` | a `qube_requests` row |
+| `latestRequest(recordType, recordId, operation, { connectionId })` | as `latestRun`, for requests |
+| `withRequestLock(id, fn)` | as `withConnectionLock`, for a request |
+| `takeRequestDelivery(requestId, dedupeKey, { page, state })` | inserts the `qube_request_deliveries` row unless `(request_id, dedupe_key)` is taken (`ON CONFLICT DO NOTHING`), in the caller's transaction, and answers whether it did |
+| `findRequestDeliveries(requestId)` | a request's deliveries, in id order |
 
 A write that breaks one of `schema.sql`'s unique keys throws `StoreConflict`. An id from a URL
 that isn't a valid id (`"abc"`) finds nothing. Check your store with the suite, from a test file of
@@ -465,6 +477,9 @@ Tables made from an earlier `schema.sql` need its two sync status indexes:
 CREATE INDEX index_qube_runs_on_connection_record_and_state ON qube_runs (connection_id, record_type, record_id, operation, state);
 CREATE INDEX index_qube_quickbooks_records_on_connection_and_record ON qube_quickbooks_records (connection_id, record_type, record_id);
 ```
+
+and, from 0.3.0, the `qube_sync_marks`, `qube_requests` and `qube_request_deliveries` tables, with
+their indexes: copy those three `CREATE TABLE`s and their `CREATE INDEX`es from `schema.sql`.
 
 ### The config file: `quickbooks-desktop/config.js`
 
@@ -496,14 +511,15 @@ module.exports = configure({
 | Setting | What it is | Default |
 | --- | --- | --- |
 | `store` | your store | none: throws |
-| `operations` | slug → operation class (each class's static `slug` is its key) | none: throws |
+| `operations` | slug → `Operation` or `PlainRequest` class (each class's static `slug` is its key) | none: throws |
 | `connectionEvents` | your `ConnectionEvents` class | none: throws |
 | `currentAccount` | `(req) → account`: the signed-in customer's account, which owns its connections. `null` answers 401. | none: throws |
 | `authorizeQuestion` | `(req, record, run) → true` when the signed-in user may answer or search that run's question, or send its start again. The run carries its `operation` and its `connection` (whose `ownerType` and `ownerId` say who connected it). Only `true` allows; anything else answers 404 (search: `[]` with 404), as for a missing run, and is logged. | allows only when `currentAccount` owns the run's connection (compared by type and id, so a null account, or one with no id, never matches); with neither this nor `currentAccount` set, throws `NotConfigured` naming the config file (a 500), as any unset setting does |
 | `recordType` | `(record) → type`: the type a row keeps for one of your records | its class's name (a plain object, as Prisma returns, needs this set) |
 | `findRecord` | `(type, id) → record`: your record of that type | none: an operation needs its own `findRecord`, and `findLinked` and `owner()` throw |
-| `enqueue` | `(delivery) →` hands `{ kind, id, body }` (kind `"run"` or `"connection"`) to your queue; `false` or a throw answers 503 | `job(delivery)` in this process, after the response, with a warning |
+| `enqueue` | `(delivery) →` hands `{ kind, id, body }` (kind `"run"`, `"connection"` or `"request"`) to your queue; `false` or a throw answers 503 | `job(delivery)` in this process, after the response, with a warning |
 | `jobAttempts` | how many times `job()` runs a delivery whose work threw, with a growing wait, before it logs an error and throws | `10` |
+| `pruneRunsAfter` | milliseconds ended runs and requests are kept before `pruneRuns()` deletes them: a day (`DAY_MS`) or more ([Storage](#storage)) | `null`: never |
 | `apiKey`, `baseUrl`, `webhookSecret`, `webhookUrl` | | the environment above; `webhookSecret` may be a list while one rotates |
 
 The secrets never show: `console.log` and `JSON.stringify` of the settings say only whether each is
@@ -537,8 +553,11 @@ app.use(qube.questions(config));
 | --- | --- |
 | `POST quickbooks/connections` | Connect, for the signed-in account. Sends its newest connection that has never connected (`pending` or `setup_cancelled`) back through setup, so clicking Connect again doesn't pile up connections. Makes a new one (the row, then QuBe Sync's connection with the row's webhook URL, then its `qubeId`, with an optional `name`) when the account has none, or with `new=1`. Redirects (303) to the setup. With `simulated=1`, outside production, it connects a simulated company file instead (below). |
 | `POST quickbooks/connections/:id/onboarding` | One of the signed-in account's connections, back through setup, with its webhook URL brought up to date (or made at QuBe Sync, for a row QuBe Sync never answered). Another account's connection answers 404. |
+| `DELETE quickbooks/connections/:id` | Disconnects one of the signed-in account's connections: QuBe Sync deletes its connection (already gone counts), then the row goes, with its runs, requests, QuickBooks ids and sync marks ([below](#disconnecting)). Goes back (303) with `RUNS_GOING` while a run or request hasn't ended, or `DISCONNECT_NO_ANSWER`; another account's connection answers 404. |
+| `POST quickbooks/connections/:id/disconnect` | The same, for an HTML form, which can't send `DELETE`. |
 | `POST webhooks/qube/runs/:id` | A run's webhooks. |
 | `POST webhooks/qube/connections/:id` | A connection's webhooks. |
+| `POST webhooks/qube/requests/:id` | A plain request's webhooks ([Plain requests](#plain-requests)). |
 | `POST qube/questions/runs/:id` | Your user's answer to the run's question, from `renderQuestion`'s forms. |
 | `GET qube/questions/runs/:id/search` | A record field's matches, as JSON. |
 | `POST qube/runs/:id/retry_start` | A start QuBe Sync never confirmed, sent again with the same reference, from `renderRunStatus`. |
@@ -547,7 +566,7 @@ app.use(qube.questions(config));
 The webhook routes verify the signature, answer 404 when the row isn't there, enqueue, and answer
 200, or 503 when the enqueue didn't take it. Any content type, up to 5 MB (413 beyond). Each id in
 a URL is only a pointer: the job checks the signed event's reference and connection id against the
-row. A signature that doesn't check out answers 401 and logs its reason, the path and what to
+row (a request's event, its id). A signature that doesn't check out answers 401 and logs its reason, the path and what to
 check, never the secret or the body (`SIGNATURE_HINTS`):
 
 | Reason | What to check |
@@ -639,6 +658,28 @@ class QuickbooksConnectionEvents extends ConnectionEvents {
 }
 
 module.exports = QuickbooksConnectionEvents;
+```
+
+#### Disconnecting
+
+```html
+<form method="post" action="/quickbooks/connections/42/disconnect"><button>Disconnect</button></form>
+```
+
+Disconnecting deletes QuBe Sync's connection (the Web Connector stops syncing that company file; a
+404 counts as gone), then, in one transaction, calls your class's `disconnected()`, where you
+delete your own rows that point at the connection, and deletes the row with its runs, requests,
+QuickBooks ids and sync marks (`connection.disconnect()`). `this.store` there is that
+transaction's, and a throw rolls it all back. It's refused while a run
+or request hasn't ended (`RUNS_GOING`: "It has a run or request that hasn't ended: wait for it, or
+answer its question, first."), and when QuBe Sync doesn't answer, nothing is deleted
+(`DISCONNECT_NO_ANSWER`). Show the message with `takeError`.
+
+```js
+// in your ConnectionEvents class
+async disconnected() {
+  await Sync.destroy({ where: { connectionId: this.connection.id } }); // your rows that point at it
+}
 ```
 
 #### QuickBooks ids
@@ -760,6 +801,11 @@ before it returns; starts the run with that reference as the idempotency key and
   `await run.retryStart()` (or `CreateInvoice.retryStart(run)`), never with a new `start`: a new
   reference would start a second run, and a second invoice.
 
+A sync's next `since`: `await this.lastSyncedAt()` in an operation (or
+`connection.lastSyncedAt(workflow)`) is when this connection's last completed run of the
+operation's workflow started, or `null` before one. Every `workflow_run.completed` the kit applies
+moves it to that run's `createdAt`, never back, in `qube_sync_marks`, so it outlives pruned runs.
+
 `retryStart` resends the same reference as the `Idempotency-Key`, with the same workflow, input
 and webhook URL: QuBe Sync answers a repeat of a start it took with the run that start made, and
 starts nothing. It returns a run that already has its `qubeRunId` as it is, and refuses one that
@@ -771,6 +817,76 @@ taken once (`once`, in the same transaction); anything else only when its revisi
 the last applied. Handlers see `this.record`, `this.run` and `this.connection`, and `this.store`,
 the lock's transaction: what a handler writes through it (a `link`, say) is saved with the revision
 or not at all. A handler you don't write logs.
+
+### Plain requests
+
+A workflow is the default: it finds or makes the records an invoice names, checks QuickBooks before
+resending after a lost answer, and asks your user when something needs a choice. Use a plain
+request (one v2 operation, `Client#queue`) for a one-off query, or a write your app settles itself:
+you handle each answer, error and lost answer.
+
+```js
+// quickbooks-desktop/find-customer.js
+const { PlainRequest } = require("qubesync/kit");
+
+class FindCustomer extends PlainRequest {
+  static operation = "customer.query"; // a v2 operation id
+  static slug = "find_customer";
+
+  params() {
+    return { full_name: this.record.name };
+  }
+
+  // Each answered page: event.responseJson.data, event.page.
+  async answered(event) {
+    const [found] = [].concat((event.responseJson && event.responseJson.data) || []);
+    if (found) await this.connection.link(this.record, { kind: "customer", qbId: found.list_id, name: found.full_name });
+  }
+
+  // Every page 1..N is in. Optional.
+  async done() {}
+
+  // error or discarded: show event.error.user_message.
+  async failed(event) {}
+
+  // QuBe Sync keeps trying (QuickBooks closed, a dialog open). Never resend. Default: logs.
+  async retrying(event) {}
+
+  // The answer never came back: QuickBooks may have applied it. Default: failed(event). A query
+  // can be queued again; check a write before resending it.
+  async timedOut(event) {}
+}
+```
+
+List it in `operations` with your operations (`find_customer: FindCustomer`), and queue it:
+
+```js
+const row = await FindCustomer.queue(customer, connection); // a QueuedRequest
+```
+
+`queue` works as `start` does: under the connection row's lock, a request for the same record, slug
+and connection that hasn't ended is returned (`row.reused`) rather than queued again, sent again
+first, with the same params and `Idempotency-Key`, when QuBe Sync never confirmed it (no `qubeId`).
+A new request, with a new key, is made only once the last has ended. The key is the row's
+`reference`, saved before the call. A refusal (a 4xx but 409) marks the row `failed` and throws; a
+timeout, a 5xx or a 409 leaves it `queued` and throws: queue again, or call `row.retryQueue()`.
+`params` that throw mark the row `failed` before anything is sent. `findRecord` works as an
+operation's. An operation id this version doesn't know needs `static method` and `static path`.
+
+The request's webhook URL is `QUBE_WEBHOOK_URL/requests/<row id>`. Each delivery is taken once, by
+`page_request_id` and `state` (`takeRequestDelivery`, in the handler's transaction), under the row's
+lock. An event whose `id` isn't the row's `qubeId` is skipped and logged (request webhooks carry no
+connection id; before the queue's answer is saved, the first event's `id` is kept). Pages can come in
+any order: `done` is called once, when every page from 1 to the one whose `iteration_state` is
+`done` is in (`not_applicable` is one page). A `retryable` isn't final, and one that arrives after
+its page's answer is skipped.
+
+A `QueuedRequest` keeps `operation` (the slug), `recordType`, `recordId`, `connectionId`,
+`reference`, `qubeId`, `params`, `state` (`queued`, `retryable`, `response_received`, `error`,
+`timed_out`, `discarded`, or `failed` for a refused queue), `error` (the webhook's),
+`pagesAnswered`, `lastPage` and `endedAt` (`ended()`, `done()`). It never keeps a response body:
+your handler stores what it needs. A delivery whose handler throws rolls back with it, so the job's
+retry runs it again.
 
 ### Run status and questions
 
@@ -828,6 +944,10 @@ connect-flash, else the session when it has one, else a short-lived `qube_error`
 SameSite=Lax, a minute). Pass it as `error` to one of `renderRunStatus` or `renderQuestion`, which
 shows it as `<p class="qube-error">`. Without Express, the kit's functions resolve to
 `{ status: 303, error }` for these; keep the message your own way and show it once.
+
+An answer QuBe Sync takes puts the run back to `running` at once (`operation.answered(token, {
+taken: true })`), so its status reads `sending`, not `needs_answer`, until the run's next webhook,
+which waits on the Web Connector's next poll. A question that changed leaves the state alone.
 
 The page doesn't update itself when the run's next event comes: Node has no standard push to the
 page (qube_rails uses Turbo's page refreshes), so the user reloads to see the next question or the
@@ -916,15 +1036,30 @@ error ("QuBe Sync: gave up on a webhook ...") and throws. A delivery whose run, 
 has been deleted since isn't retried: `run` logs a warning ("QuBe Sync: dropped ...") and returns.
 
 Without Express, `qubesync/kit` has the routes' work as plain functions: `receiveWebhook`,
-`connectQuickbooks`, `resendOnboarding`, `answerQuestion`, `searchQuestion`, `retryStart` and
-`redeliver`, each resolving to the status (and body, location or `error` to go back with) to answer
+`connectQuickbooks`, `resendOnboarding`, `disconnectQuickbooks`, `answerQuestion`,
+`searchQuestion`, `retryStart` and `redeliver`, each resolving to the status (and body, location or `error` to go back with) to answer
 with.
 
 ### Storage
 
-Rows go with their run: deleting a run deletes its notifications (`ON DELETE CASCADE`). Runs
-themselves are yours to prune once you no longer need them, for instance runs in `completed`,
-`failed` or `cancelled` whose `ended_at` is more than 90 days ago.
+Rows go with their run: deleting a run deletes its notifications (`ON DELETE CASCADE`), and
+deleting a plain request its deliveries. Disconnecting a connection deletes its runs and requests.
+Runs are kept until you say otherwise. To prune ended ones, set `pruneRunsAfter` and schedule
+`pruneRuns()` (once a day, say):
+
+```js
+// in config: pruneRunsAfter: 90 * DAY_MS,
+const { pruneRuns } = require("qubesync/kit");
+cron.schedule("0 4 * * *", () => pruneRuns()); // resolves to { runs, requests }: how many it deleted
+```
+
+It deletes only ended runs (`completed`, `failed` or `cancelled`, by `COALESCE(ended_at,
+updated_at)`: a run that failed before it started has no `ended_at`) and ended plain requests, with
+their notifications and deliveries, 500 at a time, never within a day of their end: a webhook for
+a deleted row answers 404, which QuBe Sync retries for hours. What a record's page shows stays
+right: `in_quickbooks` comes from `qube_quickbooks_records`, which are never pruned, and a sync's
+next `since` from `qube_sync_marks` (`lastSyncedAt`), which a completed run moves forward. A pruned
+run's record whose run had failed, or completed without a link, shows `not_sent` again.
 
 ## Development
 

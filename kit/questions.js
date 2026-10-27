@@ -80,7 +80,7 @@ async function answerQuestion({ runId, form, request }) {
     await found.operation.answered(question.token);
     return back(QUESTION_CHANGED);
   }
-  await found.operation.answered(question.token);
+  await found.operation.answered(question.token, { taken: true });
   return { status: 303 };
 }
 

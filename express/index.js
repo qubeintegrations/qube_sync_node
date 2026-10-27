@@ -6,7 +6,7 @@
 //   app.use(webhooks());       // before app.use(express.json()): no sign-in, no CSRF
 //   app.use(express.json());
 //   app.use(requireSignIn);    // your sign-in, and your CSRF protection
-//   app.use(connect());        // POST /quickbooks/connections, POST /quickbooks/connections/:id/onboarding
+//   app.use(connect());        // POST /quickbooks/connections, .../:id/onboarding, DELETE .../:id
 //   app.use(questions());      // POST /qube/questions/runs/:id, GET .../search, POST /qube/runs/:id/retry_start and /redeliver
 //
 // Each is optional: mount the ones your app uses. The routes are relative to where they're
@@ -65,7 +65,7 @@ function param(req, name) {
 }
 
 /**
- * POST /webhooks/qube/runs/:id and POST /webhooks/qube/connections/:id: verify the delivery over
+ * POST /webhooks/qube/runs/:id, /webhooks/qube/connections/:id and /webhooks/qube/requests/:id: verify the delivery over
  * its raw body (401 for a signature that doesn't hold, with only its reason logged), answer 404
  * when the row isn't there, enqueue it and answer 200, or 503 when the enqueue didn't take it.
  * Any content type, up to 5 MB (413 beyond). Mount it before express.json(), which would read the
@@ -76,7 +76,7 @@ function webhooks(options) {
   routerOptions("webhooks", options);
   const router = express.Router();
 
-  for (const kind of ["run", "connection"]) {
+  for (const kind of ["run", "connection", "request"]) {
     router.post(
       `/webhooks/qube/${kind}s/:id`,
       // Nothing may have read the body before this route: the signature is over its bytes.
@@ -118,6 +118,11 @@ function webhooks(options) {
  * (303) to QuBe Sync's setup, or answers 401 when currentAccount finds no account. Mount it behind
  * your sign-in and CSRF protection. QuBe Sync's setup doesn't come back to your app: it tells the
  * connection by webhook.
+ *
+ * DELETE /quickbooks/connections/:id disconnects one of the signed-in account's connections
+ * (disconnectQuickbooks), and redirects back (303), with RUNS_GOING while a run or request hasn't
+ * ended. POST /quickbooks/connections/:id/disconnect does the same, for an HTML form, which can't
+ * send DELETE.
  */
 function connect(options) {
   const express = loadExpress();
@@ -144,6 +149,11 @@ function connect(options) {
       send(req, res, await kit.resendOnboarding({ request: req, id: req.params.id }));
     })
   );
+  const disconnect = handler(async (req, res) => {
+    send(req, res, await kit.disconnectQuickbooks({ request: req, id: req.params.id }));
+  });
+  router.delete("/quickbooks/connections/:id", disconnect);
+  router.post("/quickbooks/connections/:id/disconnect", disconnect);
   return router;
 }
 

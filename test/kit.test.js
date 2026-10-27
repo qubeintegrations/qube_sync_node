@@ -129,12 +129,26 @@ describe("kit: settings", () => {
     assert.throws(() => kit.configure({ jobAttempts: 1.5 }), /jobAttempts/);
     assert.throws(() => kit.configure({ currentAccount: "me" }), /currentAccount must be a function/);
     assert.throws(() => kit.configure({ webhookSecret: [] }), /webhookSecret/);
+    assert.throws(() => kit.configure({ pruneRunsAfter: kit.DAY_MS - 1 }), /pruneRunsAfter is null or milliseconds of a day or more/);
+    assert.throws(() => kit.configure({ pruneRunsAfter: "90 days" }), /pruneRunsAfter/);
+    class NoOperation extends kit.PlainRequest {
+      static slug = "no_operation";
+    }
+    assert.throws(() => kit.configure({ operations: { no_operation: NoOperation } }), /needs a static operation/);
     // A Map works as well as an object, and a later configure keeps what it leaves out.
     kit.configure({ operations: new Map([["create_invoice", CreateInvoice]]), jobAttempts: 3 });
     assert.strictEqual(kit.settings().operationClass("create_invoice"), CreateInvoice);
     assert.strictEqual(kit.settings().operationClass("sync_customer"), null);
     assert.strictEqual(kit.settings().connectionEvents, Events);
     assert.strictEqual(kit.settings().jobAttempts, 3);
+    // A plain request goes in the same map, and each lookup finds only its own kind.
+    kit.configure({ operations: { create_invoice: CreateInvoice, find_customer: support.FindCustomer }, pruneRunsAfter: 30 * kit.DAY_MS });
+    assert.strictEqual(kit.settings().requestClass("find_customer"), support.FindCustomer);
+    assert.strictEqual(kit.settings().operationClass("find_customer"), null);
+    assert.strictEqual(kit.settings().requestClass("create_invoice"), null);
+    assert.strictEqual(kit.settings().pruneRunsAfter, 30 * kit.DAY_MS);
+    kit.configure({ pruneRunsAfter: null });
+    assert.strictEqual(kit.settings().pruneRunsAfter, null);
   });
 
   it("makes a new client when the settings change", () => {
@@ -650,7 +664,7 @@ describe("kit: a run's events", () => {
     assert.match(loggedText(), /connection 999 isn't there/);
     kit.configure({ operations: { sync_customer: SyncCustomer } });
     await assert.rejects(runEvent(run, "workflow_run.completed"), (err) => err instanceof kit.UnknownOperation);
-    await assert.rejects(kit.run({ kind: "account", id: "1", body: "{}" }), /a run or a connection, not "account"/);
+    await assert.rejects(kit.run({ kind: "account", id: "1", body: "{}" }), /a run, a connection or a request, not "account"/);
   });
 
   it("logs in the base handlers until an operation fills them in", async () => {
@@ -1024,13 +1038,26 @@ describe("kit: Operation helpers", () => {
   it("answered forgets the question only when its token is the one answered", async () => {
     reset();
     const { invoice, run } = await fixtures();
-    await run.update({ question: { token: "tok-2", choices: [] }, links: { decisions: "d" } });
+    await run.update({ state: "awaiting_input", question: { token: "tok-2", choices: [] }, links: { decisions: "d" } });
     const operation = new CreateInvoice(invoice, run);
     await operation.answered("tok-1");
     assert.strictEqual((await reload(run)).question.token, "tok-2");
     await operation.answered("tok-2");
     const after = await reload(run);
     assert.deepStrictEqual([after.question, after.links], [null, null]);
+    assert.strictEqual(after.state, "awaiting_input"); // without taken, the next webhook says
+  });
+
+  it("answered with taken puts the run back to running, only while its token is the open question's", async () => {
+    reset();
+    const { invoice, run } = await fixtures();
+    await run.update({ state: "awaiting_input", question: { token: "tok-2", choices: [] }, links: { decisions: "d" } });
+    const operation = new CreateInvoice(invoice, run);
+    await operation.answered("tok-1", { taken: true });
+    assert.strictEqual((await reload(run)).state, "awaiting_input");
+    await operation.answered("tok-2", { taken: true });
+    const after = await reload(run);
+    assert.deepStrictEqual([after.state, after.question], ["running", null]);
   });
 
   it("quickbooksRef refers by ListID when the record is linked on the run's connection, else by name, else null", async () => {
