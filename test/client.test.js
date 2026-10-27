@@ -129,7 +129,7 @@ describe("Client: construction", () => {
 
   it("is exported with the webhook names", () => {
     assert.strictEqual(typeof qubesync.verify, "function");
-    assert.strictEqual(qubesync.VERSION, "0.2.0");
+    assert.strictEqual(qubesync.VERSION, "0.3.0");
   });
 });
 
@@ -184,6 +184,8 @@ describe("Client: connections", () => {
     assert.deepStrictEqual(pick(last()), ["POST", "/api/v2/connections", { webhook_url: "https://app.test/hooks", name: "Acme" }]);
     await client().createConnection({ webhookUrl: "https://app.test/hooks" });
     assert.deepStrictEqual(last().body, { webhook_url: "https://app.test/hooks" });
+    await client().createConnection({ webhookUrl: "https://app.test/hooks", type: "simulated" });
+    assert.deepStrictEqual(last().body, { webhook_url: "https://app.test/hooks", type: "simulated" });
   });
 
   it("getConnection, listConnections, deleteConnection", async () => {
@@ -269,11 +271,55 @@ describe("Client: runs", () => {
     assert.deepStrictEqual(last().body, {});
   });
 
+  it("redeliverRun posts to the run's redeliver path and unwraps data", async () => {
+    const data = { run_id: RUN, event: "workflow_run.awaiting_input", revision: 4, webhook_url: "https://app.test/h" };
+    answer({ json: { data } });
+    assert.deepStrictEqual(await client().redeliverRun(CONN, RUN), data);
+    assert.deepStrictEqual(pick(last()), ["POST", `/api/v2/connections/${CONN}/workflow-runs/${RUN}/redeliver`, undefined]);
+  });
+
+  it("redeliverRun rejects a 409 or a 429 as an APIError, sent once", async () => {
+    answer({ status: 409, json: { errors: { code: "nothing_to_redeliver", detail: "Nothing yet" } } });
+    await assert.rejects(client().redeliverRun(CONN, RUN), (e) => e instanceof qubesync.APIError && e.status === 409 && e.code === "nothing_to_redeliver");
+    const before = received.length;
+    answer({ status: 429, json: { errors: { detail: "Too soon" } } });
+    await assert.rejects(client({ maxRetries: 0 }).redeliverRun(CONN, RUN), (e) => e.status === 429);
+    assert.strictEqual(received.length, before + 1);
+  });
+
   it("runEvents returns the whole body", async () => {
     answer({ json: { data: [{ seq: "1" }], next_after: "1" } });
     assert.deepStrictEqual(await client().runEvents(CONN, RUN, { after: "7.3", limit: 50 }), { data: [{ seq: "1" }], next_after: "1" });
     assert.strictEqual(last().path, `/api/v2/connections/${CONN}/workflow-runs/${RUN}/events`);
     assert.deepStrictEqual(last().query, [["after", "7.3"], ["limit", "50"]]);
+  });
+});
+
+describe("Client: workflow types", () => {
+  const doc = { digest: "sha256:aa", operations_digest: "sha256:bb", include_drafts: false, workflows: {} };
+
+  it("workflowTypes gets the document, with drafts on request", async () => {
+    answer({ json: { data: doc }, headers: { etag: '"sha256:aa"' } });
+    assert.deepStrictEqual(await client().workflowTypes(), doc);
+    assert.deepStrictEqual(pick(last()), ["GET", "/api/v2/workflows/types", undefined]);
+    assert.strictEqual(last().search, "");
+    assert.strictEqual(last().headers["if-none-match"], undefined);
+    await client().workflowTypes({ includeDrafts: true });
+    assert.deepStrictEqual(last().query, [["include", "drafts"]]);
+  });
+
+  it("sends etag as If-None-Match, quoting a digest, and resolves to NOT_MODIFIED on a 304", async () => {
+    answer({ status: 304 });
+    assert.strictEqual(await client().workflowTypes({ etag: "sha256:aa" }), qubesync.NOT_MODIFIED);
+    assert.strictEqual(last().headers["if-none-match"], '"sha256:aa"');
+    await client().workflowTypes({ etag: 'W/"x"', includeDrafts: true });
+    assert.strictEqual(last().headers["if-none-match"], 'W/"x"');
+    assert.strictEqual(typeof qubesync.NOT_MODIFIED, "symbol");
+  });
+
+  it("rejects any other answer outside 2xx", async () => {
+    answer({ status: 401, json: { errors: "invalid API key" } });
+    await assert.rejects(client().workflowTypes({ etag: "sha256:aa" }), (error) => error instanceof APIError && error.status === 401);
   });
 });
 
@@ -292,6 +338,15 @@ describe("Client: questions", () => {
   it("search appends field and q after the link's query", async () => {
     answer({ json: { data: [{ list_id: "80000001-1" }] } });
     assert.deepStrictEqual(await client().search(searchUrl(), { field: "customer", q: "Ac" }), [{ list_id: "80000001-1" }]);
+    assert.strictEqual(last().search, "?prompt_token=pt_1&field=customer&q=Ac");
+  });
+
+  it("search sends a rows field's row, when given", async () => {
+    answer({ json: { data: [] } });
+    await client().search(searchUrl(), { field: "records.list_id", q: "lone", row: "invoice_line_add.0.item_ref" });
+    assert.strictEqual(last().search, "?prompt_token=pt_1&field=records.list_id&q=lone&row=invoice_line_add.0.item_ref");
+    answer({ json: { data: [] } });
+    await client().search(searchUrl(), { field: "customer", q: "Ac", row: null });
     assert.strictEqual(last().search, "?prompt_token=pt_1&field=customer&q=Ac");
   });
 });
@@ -769,6 +824,12 @@ describe("Client: every generated operation", () => {
 
   it("covers the manifest", () => {
     assert.deepStrictEqual(Object.keys(OPERATIONS), manifest.operations.map((op) => op.id).sort());
+  });
+
+  it("carries the manifest's digest, as QuBe Sync names it in operations_digest", () => {
+    const bytes = require("node:fs").readFileSync(require("node:path").join(__dirname, "fixtures", "operations.json"));
+    const hex = require("node:crypto").createHash("sha256").update(bytes).digest("hex");
+    assert.strictEqual(require("../operations/index.js").DIGEST, `sha256:${hex}`);
   });
 
   it("sends each through its entity accessor and action", async () => {

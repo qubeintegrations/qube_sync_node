@@ -12,8 +12,11 @@ import {
   ClientOptions,
   RequestsPage,
   RunEventsPage,
+  Redelivery,
   RetryInfo,
   QueuedRequest,
+  NOT_MODIFIED,
+  WorkflowTypesDocument,
 } from "qubesync";
 import type { CustomerCreateParams } from "qubesync/operations/customer";
 import { CustomerMsg } from "qubesync/operations/customer_msg";
@@ -86,6 +89,7 @@ async function useClient(): Promise<void> {
   const connection: ApiObject = await client.createConnection({ webhookUrl: "https://app.test/hooks", name: "Acme" });
   const onboarding: string = connection["links"]["onboarding"];
   void onboarding;
+  await client.createConnection({ webhookUrl: "https://app.test/hooks", type: "simulated" });
   await client.getConnection("c");
   const connections: ApiObject[] = await client.listConnections();
   void connections;
@@ -104,8 +108,20 @@ async function useClient(): Promise<void> {
   await client.listRuns("c", { reference: "order-1", state: "awaiting_input", outcome: "succeeded" });
   await client.cancelRun(run.links.cancel, { reason: "asked" });
   await client.cancelRun(run.links.cancel);
+  const redelivery: Redelivery = await client.redeliverRun("c", "r");
+  const redeliveredRevision: number = redelivery.revision;
+  void redeliveredRevision;
   const events: RunEventsPage = await client.runEvents("c", "r", { after: "7.3", limit: 50 });
   void events.next_after;
+
+  const types = await client.workflowTypes({ includeDrafts: true, etag: "sha256:aa" });
+  if (types !== NOT_MODIFIED) {
+    const doc: WorkflowTypesDocument = types;
+    const version: number | null = doc.workflows.add_transaction.version;
+    void version;
+  }
+  // @ts-expect-error includeDrafts is a boolean
+  await client.workflowTypes({ includeDrafts: "yes" });
 
   await client.answer(run.prompt.links.decisions, { choice: "use_existing", data: { customer: "1" } });
   const matches: ApiObject[] = await client.search(run.prompt.links.search, { field: "customer", q: "Ac" });

@@ -17,6 +17,7 @@ export const {
   UnknownEvent,
   Client,
   APIError,
+  NOT_MODIFIED,
 } = qubesync;
 
 export default qubesync;

@@ -33,6 +33,8 @@ const MIN_TIME_LEFT_MS = 1000;
 const MAY_HAVE_ARRIVED_STATUSES = new Set([502, 504]);
 // Network errors raised after the connection opened: the request may have arrived.
 const mayHaveArrived = new WeakSet();
+// What workflowTypes resolves to on a 304: the document is still the one its etag names.
+const NOT_MODIFIED = Symbol("qubesync.notModified");
 
 function userAgent() {
   // Required lazily: index.js requires this file, and owns VERSION.
@@ -86,6 +88,12 @@ function describe(errors, body, status) {
   const raw = oneLine(body);
   if (raw !== "") return raw.slice(0, MESSAGE_BODY_LIMIT);
   return http.STATUS_CODES[status] || "no body";
+}
+
+// An If-None-Match value: a digest is quoted; an ETag as it came (quoted, or weak) is sent as it is.
+function entityTag(value) {
+  const text = String(value);
+  return text.startsWith('"') || text.startsWith("W/") ? text : `"${text}"`;
 }
 
 function requireString(value, name) {
@@ -270,8 +278,10 @@ class Client {
   // -------------------------------------------------------------------------
   // Connections
 
-  async createConnection({ webhookUrl, name } = {}) {
-    return this.#data("POST", "/connections", compact({ webhook_url: requireString(webhookUrl, "webhookUrl"), name }));
+  // type: "simulated" connects a simulated company file at once, for testing.
+  async createConnection({ webhookUrl, name, type } = {}) {
+    const body = compact({ webhook_url: requireString(webhookUrl, "webhookUrl"), name, type });
+    return this.#data("POST", "/connections", body);
   }
 
   async getConnection(id) {
@@ -335,10 +345,44 @@ class Client {
     return this.#data("POST", requireString(cancelUrl, "cancelUrl"), compact({ reason }));
   }
 
+  /**
+   * Has QuBe Sync send the run's latest event again. Resolves to `{ run_id, event, revision,
+   * webhook_url }`; 409 when there's nothing to send yet, 429 when asked again too soon.
+   */
+  async redeliverRun(connectionId, runId) {
+    const path = `/connections/${requireId(connectionId, "connectionId")}/workflow-runs/${requireId(runId, "runId")}/redeliver`;
+    return this.#data("POST", path);
+  }
+
   /** The whole body: `{ data: [...events], next_after }`. */
   async runEvents(connectionId, runId, { after, limit } = {}) {
     const path = `/connections/${requireId(connectionId, "connectionId")}/workflow-runs/${requireId(runId, "runId")}/events`;
     return this.request("GET", path, undefined, { query: { after, limit } });
+  }
+
+  // -------------------------------------------------------------------------
+  // Workflow types
+
+  /**
+   * The input types of the app's workflows, which `npx qubesync workflows` renders into a typed
+   * module (qubesync/workflow-types). Resolves to the document (the response's data): `digest`,
+   * `operations_digest`, `include_drafts`, `workflows` (each published workflow at its published
+   * version) and, with `includeDrafts: true`, `drafts` (each workflow whose working copy differs
+   * from it). With `etag` (a document's `digest`, or the ETag it came with), resolves to
+   * NOT_MODIFIED when the document is still that one.
+   */
+  async workflowTypes({ includeDrafts = false, etag } = {}) {
+    const headers = {};
+    if (etag !== undefined && etag !== null && etag !== "") headers["If-None-Match"] = entityTag(etag);
+    try {
+      return await this.#data("GET", "/workflows/types", undefined, {
+        query: { include: includeDrafts ? "drafts" : undefined },
+        headers,
+      });
+    } catch (error) {
+      if (error instanceof APIError && error.status === 304) return NOT_MODIFIED;
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -352,10 +396,11 @@ class Client {
     return this.#data("POST", requireString(decisionsUrl, "decisionsUrl"), body, { retrySafe: hasPromptToken(decisionsUrl) });
   }
 
-  async search(searchUrl, { field, q } = {}) {
-    return this.#data("GET", requireString(searchUrl, "searchUrl"), undefined, {
-      query: { field: requireString(field, "field"), q: requireQuery(q) },
-    });
+  // row: a rows field's row key, for a column whose search kind depends on the row.
+  async search(searchUrl, { field, q, row } = {}) {
+    const query = { field: requireString(field, "field"), q: requireQuery(q) };
+    if (row !== undefined && row !== null && row !== "") query.row = requireString(row, "row");
+    return this.#data("GET", requireString(searchUrl, "searchUrl"), undefined, { query });
   }
 
   // -------------------------------------------------------------------------
@@ -657,4 +702,4 @@ for (const [name, load] of Object.entries(operations().ENTITIES)) {
   });
 }
 
-module.exports = { Client, APIError };
+module.exports = { Client, APIError, NOT_MODIFIED };

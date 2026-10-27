@@ -1,7 +1,7 @@
 {
   "name": "qubesync",
-  "version": "0.2.0",
-  "description": "The QuBe Sync v2 API client, and webhook verification and parsing (QuickBooks Desktop through qubesync.com).",
+  "version": "0.3.0",
+  "description": "The QuBe Sync v2 API client, webhook verification and parsing, and the integration kit (qubesync/kit, qubesync/express): QuickBooks Desktop through qubesync.com.",
   "license": "MIT",
   "author": "QuBe Sync",
   "homepage": "https://docs.qubesync.com",
@@ -16,7 +16,8 @@
     "quickbooks-desktop",
     "api-client",
     "webhooks",
-    "hmac"
+    "hmac",
+    "express"
   ],
   "main": "./index.js",
   "types": "./index.d.ts",
@@ -26,16 +27,45 @@
       "import": "./index.mjs",
       "require": "./index.js"
     },
+    "./kit": {
+      "types": "./kit/index.d.ts",
+      "import": "./kit/index.mjs",
+      "require": "./kit/index.js"
+    },
+    "./kit/store-tests": {
+      "types": "./kit/store-tests.d.ts",
+      "import": "./kit/store-tests.mjs",
+      "require": "./kit/store-tests.js"
+    },
+    "./kit/schema.sql": "./kit/schema.sql",
+    "./kit/question.js": "./kit/assets/question.js",
+    "./kit/qubesync.css": "./kit/assets/qubesync.css",
+    "./express": {
+      "types": "./express/index.d.ts",
+      "import": "./express/index.mjs",
+      "require": "./express/index.js"
+    },
+    "./workflow-types": {
+      "types": "./workflow-types/index.d.ts",
+      "default": "./workflow-types/index.js"
+    },
     "./operations/*": {
       "types": "./operations/*.d.ts",
       "default": "./operations/*.js"
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "qubesync": "bin/qubesync.js"
+  },
   "files": [
     "index.js",
     "client.js",
     "operations/",
+    "kit/",
+    "express/",
+    "workflow-types/",
+    "bin/",
     "index.mjs",
     "index.d.ts",
     "README.md",
@@ -46,9 +76,22 @@
     "node": ">=16.17"
   },
   "scripts": {
-    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs",
-    "test:types": "npx -y -p typescript@5.6.3 tsc --noEmit --strict --module node16 --moduleResolution node16 --target es2020 test/types.ts",
+    "test": "node --test test/webhooks.test.js test/client.test.js test/esm.test.mjs test/kit.test.js test/kit-requests.test.js test/kit-disconnect.test.js test/kit-styling.test.js test/store.test.js test/express.test.js test/kit-esm.test.mjs test/workflow-types.test.js",
+    "test:types": "tsc --noEmit --strict --module node16 --moduleResolution node16 --target es2020 test/types.ts test/kit-types.ts test/workflow-types.ts",
     "generate": "node scripts/generate-operations.js",
     "generate:check": "node scripts/generate-operations.js --check"
+  },
+  "peerDependencies": {
+    "express": ">=4.17 <6"
+  },
+  "peerDependenciesMeta": {
+    "express": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/express": "4.17.21",
+    "express": "4.21.2",
+    "typescript": "5.6.3"
   }
 }

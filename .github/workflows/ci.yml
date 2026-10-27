@@ -16,7 +16,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+      # The dev dependencies: Express 4 (which runs on Node 16) for qubesync/express's tests, and
+      # TypeScript with Express's types for test:types. The package itself has none.
+      - run: npm ci
+      # Every suite, the kit's and the Express adapter's included.
       - run: npm test
+      - name: qubesync/express on Express 5
+        if: matrix.node == '22'
+        run: |
+          npm install --no-save express@5
+          node --test test/express.test.js test/kit.test.js
+          npm ci
       - name: operations/ matches test/fixtures/operations.json
         run: node scripts/generate-operations.js --check
       - if: matrix.node == '22'

@@ -210,6 +210,21 @@ export interface ConnectionOptions {
   name?: string;
 }
 
+export interface CreateConnectionOptions extends ConnectionOptions {
+  webhookUrl: string;
+  /** "simulated": a simulated QuickBooks company file, connected as it's made. */
+  type?: "simulated" | (string & {});
+}
+
+/** What `redeliverRun` resolves to. */
+export interface Redelivery {
+  run_id: string;
+  event: string;
+  revision: number;
+  webhook_url: string;
+  [key: string]: any;
+}
+
 export interface StartRunOptions {
   /** Your own id for the run; also sent as the Idempotency-Key. */
   reference: string;
@@ -242,8 +257,11 @@ export interface AnswerOptions {
 }
 
 export interface SearchOptions {
+  /** The field's name; a rows field's column is `<field>.<column>`. */
   field: string;
   q: string;
+  /** A rows field's row key: the row whose column is searched. */
+  row?: string | null;
 }
 
 import type { OperationOptions, QueuedRequest } from "./operations/types";
@@ -281,6 +299,42 @@ export interface RequestsPage {
   [key: string]: any;
 }
 
+/** One workflow of a workflow types document. */
+export interface WorkflowTypesEntry {
+  name: string;
+  description: string;
+  /** Its published version, or null for a draft. */
+  version: number | null;
+  draft: boolean;
+  /** The workflow's input, as JSON Schema; an operation's body is `{ "$operation": "<id>" }`. */
+  input: ApiObject;
+  [key: string]: any;
+}
+
+/** What `GET /api/v2/workflows/types` answers: the input types of the app's workflows. */
+export interface WorkflowTypesDocument {
+  /** Covers the rest of the document: what `npx qubesync workflows --check` compares. */
+  digest: string;
+  /** The digest of the operations manifest the `$operation` ids refer to. */
+  operations_digest: string;
+  include_drafts: boolean;
+  /** Each published workflow, at its published version, by key. */
+  workflows: { [key: string]: WorkflowTypesEntry };
+  /** With `includeDrafts`: each workflow whose working copy differs from its published version. */
+  drafts?: { [key: string]: WorkflowTypesEntry };
+  [key: string]: any;
+}
+
+export interface WorkflowTypesOptions {
+  /** Add each workflow's draft (`?include=drafts`). Default false. */
+  includeDrafts?: boolean;
+  /** A document's `digest` (or its ETag), sent as If-None-Match. */
+  etag?: string | null;
+}
+
+/** What `workflowTypes` resolves to on a 304: the document is still the one `etag` names. */
+export declare const NOT_MODIFIED: unique symbol;
+
 export interface RequestOptions {
   query?: Query;
   headers?: { [name: string]: string | number | undefined };
@@ -303,7 +357,7 @@ export declare class Client {
   readonly totalTimeout: number;
   toJSON(): { baseUrl: string };
 
-  createConnection(options: ConnectionOptions & { webhookUrl: string }): Promise<ApiObject>;
+  createConnection(options: CreateConnectionOptions): Promise<ApiObject>;
   getConnection(id: string): Promise<ApiObject>;
   listConnections(): Promise<ApiObject[]>;
   updateConnection(id: string, options: ConnectionOptions): Promise<ApiObject>;
@@ -322,8 +376,16 @@ export declare class Client {
   listRuns(connectionId: string, filters?: ListRunsFilters): Promise<ApiObject[]>;
   /** Takes the run's `links.cancel`. */
   cancelRun(cancelUrl: string, options?: { reason?: string }): Promise<ApiObject>;
+  /** The run's latest event sent again. 409: nothing to send yet; 429: asked again too soon. */
+  redeliverRun(connectionId: string, runId: string): Promise<Redelivery>;
   /** The whole body, `{ data, next_after }`. */
   runEvents(connectionId: string, runId: string, options?: RunEventsOptions): Promise<RunEventsPage>;
+
+  /**
+   * The input types of the app's workflows (`GET /workflows/types`), which `npx qubesync workflows`
+   * renders. With `etag`, resolves to NOT_MODIFIED when the document is still that one.
+   */
+  workflowTypes(options?: WorkflowTypesOptions): Promise<WorkflowTypesDocument | typeof NOT_MODIFIED>;
 
   /**
    * Takes the prompt's `links.decisions`. Retried when the link has a `prompt_token`; a retry after
