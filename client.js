@@ -396,10 +396,11 @@ class Client {
     return this.#data("POST", requireString(decisionsUrl, "decisionsUrl"), body, { retrySafe: hasPromptToken(decisionsUrl) });
   }
 
-  async search(searchUrl, { field, q } = {}) {
-    return this.#data("GET", requireString(searchUrl, "searchUrl"), undefined, {
-      query: { field: requireString(field, "field"), q: requireQuery(q) },
-    });
+  // row: a rows field's row key, for a column whose search kind depends on the row.
+  async search(searchUrl, { field, q, row } = {}) {
+    const query = { field: requireString(field, "field"), q: requireQuery(q) };
+    if (row !== undefined && row !== null && row !== "") query.row = requireString(row, "row");
+    return this.#data("GET", requireString(searchUrl, "searchUrl"), undefined, { query });
   }
 
   // -------------------------------------------------------------------------

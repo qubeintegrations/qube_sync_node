@@ -26,6 +26,7 @@ import {
   RUNS_GOING,
   renderQuestion,
   renderRunStatus,
+  ROWS_SCRIPT,
   run,
   withoutNils,
 } from "qubesync/kit";
@@ -189,7 +190,7 @@ app.get("/invoices/:id", async (req, res) => {
   void [row.state, queued.done(), queued.webhookUrl(), since];
   const error: string | null = takeError(req, res);
   const where: string = connection.inQuickbooksSql("invoices", { recordType: "Invoice" }) + connection.sendingSql("invoices", { recordType: "Invoice", operation: "create_invoice", dialect: "mysql" });
-  res.send(renderRunStatus(sync, { error }) + renderQuestion(sync) + name + qbId + retry + stuck + reused + where + REDELIVERY_REFUSED[409] + SIGNATURE_HINTS.stale);
+  res.send(renderRunStatus(sync, { error }) + renderQuestion(sync) + name + qbId + retry + stuck + reused + where + REDELIVERY_REFUSED[409] + SIGNATURE_HINTS.stale + ROWS_SCRIPT);
 });
 
 async function routes(req: Request): Promise<number> {

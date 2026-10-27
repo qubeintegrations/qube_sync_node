@@ -257,8 +257,11 @@ export interface AnswerOptions {
 }
 
 export interface SearchOptions {
+  /** The field's name; a rows field's column is `<field>.<column>`. */
   field: string;
   q: string;
+  /** A rows field's row key: the row whose column is searched. */
+  row?: string | null;
 }
 
 import type { OperationOptions, QueuedRequest } from "./operations/types";

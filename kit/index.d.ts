@@ -32,11 +32,46 @@ export interface QubeChoice {
 
 export interface QubeField {
   name: string;
-  /** string, number, boolean or record */
+  /** string, number, boolean, record or rows */
   type: string;
   label?: string | null;
   required?: boolean;
-  kind?: string;
+  kind?: string | null;
+  /** A fixed list: shown as a select. */
+  enum?: QubeEnumOption[] | null;
+  /** A rows field's columns. */
+  columns?: QubeRowsColumn[];
+  /** A rows field's rows: answered as { row key: { column: value } }. */
+  rows?: QubeRow[];
+}
+
+export interface QubeEnumOption {
+  value: string;
+  label?: string | null;
+}
+
+/** A rows field's column. */
+export interface QubeRowsColumn {
+  name: string;
+  /** string, number or record */
+  type: string;
+  label?: string | null;
+  required?: boolean;
+  /** A record column's search kind, or null when it depends on the row. */
+  kind?: string | null;
+  /** Applies only while each listed column's value is one of these. */
+  when?: Record<string, string[]> | null;
+  enum?: QubeEnumOption[] | null;
+}
+
+/** One row of a rows field: the columns it asks, and preset values for the others. */
+export interface QubeRow {
+  key: string;
+  label: string;
+  detail?: string | null;
+  columns: string[];
+  values?: Record<string, unknown>;
+  kinds?: Record<string, string>;
 }
 
 /** A question a run asks (event.prompt), as Operation's question keeps it on the run. */
@@ -866,7 +901,7 @@ export declare const NOT_QUIET: string;
 export declare const REDELIVERY_REFUSED: Readonly<{ 409: string; 429: string }>;
 /** redeliver's message when QuBe Sync didn't answer. */
 export declare const NO_ANSWER: string;
-export declare const SEARCH_LIMITS: { readonly minQuery: number; readonly maxQuery: number; readonly maxField: number };
+export declare const SEARCH_LIMITS: { readonly minQuery: number; readonly maxQuery: number; readonly maxField: number; readonly maxRow: number };
 
 export interface SearchMatch {
   value: string;
@@ -884,7 +919,7 @@ export interface NotFound {
 /** { status: 303 } once answered; { status: 303, error } when the question changed or a field was refused; or 404. */
 export declare function answerQuestion(input: { runId: RowId; form: Record<string, unknown>; request: any }): Promise<BackToPage | NotFound>;
 /** { status, json }: 200 with the matches ([] outside the bounds), 404 [], 409 [] no longer searching, QuBe Sync's 4xx with []. */
-export declare function searchQuestion(input: { runId: RowId; field: unknown; q: unknown; request: any }): Promise<{ status: number; json: SearchMatch[] }>;
+export declare function searchQuestion(input: { runId: RowId; field: unknown; q: unknown; row?: unknown; request: any }): Promise<{ status: number; json: SearchMatch[] }>;
 /** { status: 303 } once sent (or refused, or unanswered again); { status: 303, error: NOT_STARTING }; or 404. */
 export declare function retryStart(input: { runId: RowId; request: any }): Promise<BackToPage | NotFound>;
 /** A stuck run's latest event sent again (Client#redeliverRun): { status: 303 }, { status: 303, error }, or 404. */
@@ -928,6 +963,8 @@ export declare function renderRunStatus(status: SyncStatus | Run | null | undefi
 export declare function escapeHtml(value: unknown): string;
 /** The search box's script, for markup of your own. */
 export declare const SEARCH_SCRIPT: string;
+/** A rows field's script (each cell's "when", and "Set selected"), for markup of your own. */
+export declare const ROWS_SCRIPT: string;
 
 // ---------------------------------------------------------------------------
 // Mapping helpers

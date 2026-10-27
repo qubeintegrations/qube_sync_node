@@ -940,7 +940,13 @@ question, a form per choice posting to `qube/questions/runs/:id`, and a record f
 searching through your app, so the API key never reaches the browser. It takes a `SyncStatus` or a
 `Run`. Both return `""` when there's nothing to show, escape every value, and use `qube-` classes for
 your CSS; `mount` is where `questions()` is mounted. For other markup, write your own with
-`escapeHtml` and `SEARCH_SCRIPT`.
+`escapeHtml`, `SEARCH_SCRIPT` and `ROWS_SCRIPT`. A fixed list (a field's `enum`) shows as a select.
+
+A rows field (`add_transaction`'s one question for every record QuickBooks doesn't have) shows as a
+table: a row per record with the columns it asks, a column shown only while its `when` holds, a
+search per record column (sent with the row: `search(url, { field: "records.list_id", q, row })`),
+and a "Set selected" bar that fills a column on every ticked row. Its inputs are named
+`data[<field>][<row key>][<column>]`, and its answer is `{ records: { <row key>: { <column>: value } } }`.
 
 When an answer, a retry or a redelivery can't go through, the route redirects back with a message.
 `takeError(req, res)` (`qubesync/express`) reads it once: from `req.flash` when your app has

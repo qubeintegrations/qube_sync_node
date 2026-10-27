@@ -513,6 +513,66 @@ describe("express: questions", () => {
     return form(`/qube/questions/runs/${run.id}`, fields, account, { Referer: `/invoices/${run.recordId}`, ...headers });
   }
 
+  it("POST /qube/questions/runs/:id posts a rows field as each row's filled, asked columns, by row key", async () => {
+    reset();
+    const { account, run } = await asking();
+    const rows = {
+      id: "proceed",
+      label: "Create or use these",
+      fields: [
+        {
+          name: "records",
+          type: "rows",
+          columns: [
+            { name: "action", type: "string" },
+            { name: "list_id", type: "record" },
+            { name: "item_type", type: "string" },
+            { name: "income_account", type: "record" },
+            { name: "asset_account", type: "record" },
+          ],
+          rows: [
+            { key: "customer_ref", columns: ["action", "list_id"] },
+            { key: "invoice_line_add.0.item_ref", columns: ["action", "list_id", "item_type", "income_account", "asset_account"] },
+            { key: "invoice_line_add.1.item_ref", columns: ["action", "list_id", "income_account"], values: { item_type: "item_non_inventory" } },
+          ],
+        },
+      ],
+    };
+    await run.update({ question: { ...question, choices: [...question.choices, rows] } });
+    answer(data({ state: "running" }));
+    const res = await request(
+      app(),
+      answerForm(
+        run,
+        {
+          choice: "proceed",
+          "data[records][customer_ref][action]": "use",
+          "data[records][customer_ref][list_id]": "80000001-1",
+          "data[records][customer_ref][item_type]": "item_service",
+          "data[records][invoice_line_add.0.item_ref][action]": "create",
+          "data[records][invoice_line_add.0.item_ref][list_id]": "",
+          "data[records][invoice_line_add.0.item_ref][item_type]": "item_inventory",
+          "data[records][invoice_line_add.0.item_ref][income_account]": "8000000A-1",
+          "data[records][invoice_line_add.0.item_ref][asset_account]": "80000005-1",
+          "data[records][invoice_line_add.1.item_ref][action]": "create",
+          "data[records][invoice_line_add.1.item_ref][income_account]": "8000000A-1",
+        },
+        account
+      )
+    );
+    assert.strictEqual(res.status, 303);
+    assert.deepStrictEqual(fake.received[0].body, {
+      choice: "proceed",
+      data: {
+        records: {
+          customer_ref: { action: "use", list_id: "80000001-1" },
+          "invoice_line_add.0.item_ref": { action: "create", item_type: "item_inventory", income_account: "8000000A-1", asset_account: "80000005-1" },
+          "invoice_line_add.1.item_ref": { action: "create", income_account: "8000000A-1" },
+        },
+      },
+    });
+  });
+
   it("POST /qube/questions/runs/:id posts the choice with its fields as their types, forgets the question and goes back", async () => {
     reset();
     const { account, run } = await asking();
@@ -681,6 +741,19 @@ describe("express: questions", () => {
       const res = await request(app(), search(run, { field: "customer", q: " Riv " }, account));
       assert.deepStrictEqual([res.status, JSON.parse(res.text)], [200, matches]);
       assert.deepStrictEqual([fake.received[0].query.field, fake.received[0].query.q, fake.received[0].query.prompt_token], ["customer", "Riv", "tok"]);
+    });
+
+    it("passes a rows field's row on, and drops one over 200 characters", async () => {
+      reset();
+      const { account, run } = await asking();
+      answer(data([]));
+      answer(data([]));
+      let res = await request(app(), search(run, { field: "records.list_id", q: "lone", row: "customer_ref" }, account));
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual([fake.received[0].query.field, fake.received[0].query.q, fake.received[0].query.row], ["records.list_id", "lone", "customer_ref"]);
+      res = await request(app(), search(run, { field: "records.list_id", q: "lone", row: "r".repeat(201) }, account));
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(fake.received[1].query.row, undefined);
     });
 
     it("asks nothing for fewer than 2 or more than 100 characters, or a field name over 100", async () => {

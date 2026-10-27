@@ -254,7 +254,7 @@ function questions(options) {
   router.get(
     "/qube/questions/runs/:id/search",
     handler(async (req, res) => {
-      const { status, json } = await kit.searchQuestion({ runId: req.params.id, field: req.query.field, q: req.query.q, request: req });
+      const { status, json } = await kit.searchQuestion({ runId: req.params.id, field: req.query.field, q: req.query.q, row: req.query.row, request: req });
       res.status(status).json(json);
     })
   );

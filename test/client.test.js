@@ -340,6 +340,15 @@ describe("Client: questions", () => {
     assert.deepStrictEqual(await client().search(searchUrl(), { field: "customer", q: "Ac" }), [{ list_id: "80000001-1" }]);
     assert.strictEqual(last().search, "?prompt_token=pt_1&field=customer&q=Ac");
   });
+
+  it("search sends a rows field's row, when given", async () => {
+    answer({ json: { data: [] } });
+    await client().search(searchUrl(), { field: "records.list_id", q: "lone", row: "invoice_line_add.0.item_ref" });
+    assert.strictEqual(last().search, "?prompt_token=pt_1&field=records.list_id&q=lone&row=invoice_line_add.0.item_ref");
+    answer({ json: { data: [] } });
+    await client().search(searchUrl(), { field: "customer", q: "Ac", row: null });
+    assert.strictEqual(last().search, "?prompt_token=pt_1&field=customer&q=Ac");
+  });
 });
 
 describe("Client: links", () => {

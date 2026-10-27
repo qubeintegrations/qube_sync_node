@@ -4,6 +4,14 @@
 
 From qube_rails' second round (2026-10-27):
 
+- **Rows questions**: `renderQuestion` shows a rows field as a table (`add_transaction`'s one
+  question for every missing record): the columns each row asks, inputs named
+  `data[<field>][<row key>][<column>]`, a search per record column sent with its row, and "Set
+  selected" for many rows, with its script `ROWS_SCRIPT`. A field's `enum` shows as a select.
+  `answerData` answers a rows field as `{ <row key>: { <column>: value } }`; `client.search(url,
+  { field, q, row })` and `searchQuestion({ ..., row })` (the search route's `row`, at most 200
+  characters, `SEARCH_LIMITS.maxRow`) send the row. The search script is rendered once per question.
+
 - **Realtime connections**: workflows run only on realtime connections. Onboarding creates
   connections with the `connectionType` setting's type, `"realtime"` (the default) or
   `"standard"` (anything else throws); simulated connections stay simulated. A start or

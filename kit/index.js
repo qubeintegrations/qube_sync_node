@@ -96,6 +96,7 @@ module.exports = {
   renderRunStatus: render.renderRunStatus,
   escapeHtml: render.escapeHtml,
   SEARCH_SCRIPT: render.SEARCH_SCRIPT,
+  ROWS_SCRIPT: render.ROWS_SCRIPT,
   // Mapping helpers
   get: mapping.get,
   rows: mapping.rows,

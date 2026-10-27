@@ -1163,6 +1163,45 @@ describe("kit: answers", () => {
     assert.deepStrictEqual(kit.answerData(choice, {}), { rush: false });
   });
 
+  it("answerData takes a rows field's asked columns by row key, nested or flat", () => {
+    const rowsChoice = {
+      id: "proceed",
+      fields: [
+        {
+          name: "records",
+          type: "rows",
+          columns: [{ name: "action", type: "string" }, { name: "list_id", type: "record" }, { name: "qty", type: "number" }],
+          rows: [
+            { key: "customer_ref", columns: ["action", "list_id"] },
+            { key: "line.0.item_ref", columns: ["action", "qty"], values: { list_id: "x" } },
+            { key: "line.1.item_ref", columns: ["action"] },
+          ],
+        },
+      ],
+    };
+    const flat = {
+      "data[records][customer_ref][action]": " use ",
+      "data[records][customer_ref][list_id]": "80000001-1",
+      "data[records][customer_ref][qty]": "9",
+      "data[records][line.0.item_ref][action]": "create",
+      "data[records][line.0.item_ref][list_id]": "nope",
+      "data[records][line.0.item_ref][qty]": "2",
+      "data[records][line.1.item_ref][action]": " ",
+    };
+    const nested = {
+      data: {
+        records: {
+          customer_ref: { action: "use", list_id: "80000001-1", qty: "9" },
+          "line.0.item_ref": { action: "create", list_id: "nope", qty: "2" },
+          "line.1.item_ref": "odd",
+        },
+      },
+    };
+    const expected = { records: { customer_ref: { action: "use", list_id: "80000001-1" }, "line.0.item_ref": { action: "create", qty: 2 }, "line.1.item_ref": {} } };
+    assert.deepStrictEqual(kit.answerData(rowsChoice, flat), expected);
+    assert.deepStrictEqual(kit.answerData(rowsChoice, nested), expected);
+  });
+
   it("refusalMessage reads errors.detail", () => {
     assert.strictEqual(kit.refusalMessage(new kit.APIError(422, JSON.stringify({ errors: { detail: "count must be whole" } }))), "QuBe Sync couldn't take that answer: count must be whole");
     assert.strictEqual(kit.refusalMessage(new kit.APIError(422, "<html>")), "QuBe Sync couldn't take that answer.");
@@ -1201,6 +1240,89 @@ describe("kit: renderQuestion and renderRunStatus", () => {
     assert.ok(html.includes(`<input type="text" id="qube-tok-1-why" name="data[why]">`));
     assert.ok(html.includes(`<input type="number" step="any" id="qube-tok-1-n" name="data[n]">`));
     assert.ok(html.includes(`<input type="checkbox" id="qube-tok-1-b" name="data[b]" value="true">`));
+  });
+
+  it("shows a fixed list (enum) as a select, and sends no script without a search", async () => {
+    reset();
+    const { run } = await fixtures();
+    const choices = [{ id: "go", label: "Go", fields: [{ name: "kind", type: "string", required: true, enum: [{ value: "a", label: "A <1>" }, { value: "b" }] }] }];
+    await run.update({ question: { token: "tok", message: "Which?", choices } });
+    const html = kit.renderQuestion(run);
+    const select = `<select id="qube-tok-0-kind" name="data[kind]" required><option value=""></option><option value="a">A &lt;1&gt;</option><option value="b">b</option></select>`;
+    assert.ok(html.includes(select));
+    assert.ok(!html.includes("<script"));
+  });
+
+  describe("a rows field", () => {
+    const items = [{ value: "item_service", label: "Service" }, { value: "item_inventory", label: "Inventory part" }, { value: "item_non_inventory", label: "Non-inventory part" }];
+    const rowsQuestion = {
+      token: "tok",
+      message: "QuickBooks doesn't have these records the transaction names.",
+      choices: [
+        {
+          id: "proceed",
+          label: "Create or use these, then add the transaction",
+          fields: [
+            {
+              name: "records",
+              type: "rows",
+              label: "Records QuickBooks doesn't have",
+              required: true,
+              columns: [
+                { name: "action", type: "string", required: true, label: "What to do", enum: [{ value: "create", label: "Create it" }, { value: "use", label: "Use one" }] },
+                { name: "list_id", type: "record", required: true, label: "Record to use", kind: null, when: { action: ["use"] } },
+                { name: "item_type", type: "string", required: true, label: "Item type", enum: items, when: { action: ["create"] } },
+                { name: "income_account", type: "record", required: true, label: "Income account", kind: "account", when: { action: ["create"] } },
+                { name: "asset_account", type: "record", required: true, label: "Asset account", kind: "account", when: { action: ["create"], item_type: ["item_inventory"] } },
+                { name: "memo", type: "string", label: "Memo" },
+              ],
+              rows: [
+                { key: "customer_ref", label: "Lone Star Supply", detail: "Customer", columns: ["action", "list_id"], values: {} },
+                { key: "invoice_line_add.0.item_ref", label: "Vinyl Banner", detail: "Item", columns: ["action", "list_id", "item_type", "income_account", "asset_account", "memo"], values: {} },
+                { key: "invoice_line_add.1.item_ref", label: "Hardware Kit", detail: "Item", columns: ["action", "list_id", "income_account"], values: { item_type: "item_non_inventory" } },
+              ],
+            },
+          ],
+        },
+        { id: "cancel", label: "Cancel", fields: [] },
+      ],
+    };
+
+    it("shows a table: a row per record, the columns it asks, a search per record column with its row, and a bulk bar", async () => {
+      reset();
+      const { run } = await fixtures();
+      await run.update({ question: rowsQuestion, links: { decisions: "d", search: "s" } });
+      const html = kit.renderQuestion(run, { nonce: "n1" });
+      const search = `/qube/questions/runs/${run.id}/search`;
+      assert.ok(html.includes(`<div class="qube-field qube-rows" data-qube-rows>`));
+      assert.ok(html.includes(`<th><input type="checkbox" class="qube-rows-all" aria-label="Select all"></th>`));
+      const rowKeys = [...html.matchAll(/<tr data-qube-row="([^"]+)"/g)].map((m) => m[1]);
+      assert.deepStrictEqual(rowKeys, ["customer_ref", "invoice_line_add.0.item_ref", "invoice_line_add.1.item_ref"]);
+      assert.ok(html.includes(`<th scope="row">Lone Star Supply <span class="qube-rows-detail">Customer</span></th>`));
+      // The customer row asks action and list_id only.
+      assert.ok(html.includes(`<select name="data[records][customer_ref][action]" class="qube-rows-input" aria-label="What to do" required><option value=""></option><option value="create">Create it</option><option value="use">Use one</option></select>`));
+      assert.ok(!html.includes(`name="data[records][customer_ref][item_type]"`));
+      assert.ok(html.includes(`<div class="qube-search" data-qube-search="${search}" data-qube-field="records.list_id" data-qube-row="customer_ref">`));
+      assert.ok(html.includes(`<input type="hidden" class="qube-search-value qube-rows-input" name="data[records][customer_ref][list_id]">`));
+      assert.ok(html.includes(`<input type="text" name="data[records][invoice_line_add.0.item_ref][memo]" class="qube-rows-input" aria-label="Memo">`));
+      assert.ok(html.includes(`<td data-qube-col="asset_account" data-qube-when="${kit.escapeHtml(JSON.stringify({ action: ["create"], item_type: ["item_inventory"] }))}">`));
+      // A preset value shows as its enum label.
+      assert.ok(html.includes(`data-qube-values="${kit.escapeHtml(JSON.stringify({ item_type: "item_non_inventory" }))}"`));
+      assert.ok(/<td data-qube-col="item_type"[^>]*>\s*Non-inventory part\s*<\/td>/.test(html));
+      // Set selected: a select per enum column and a search per record column with a fixed kind, never posted.
+      const bulk = (col) => html.split(`<td data-qube-bulk="${col}">`)[1].split("</td>")[0];
+      assert.ok(bulk("income_account").includes(`<div class="qube-search" data-qube-search="${search}" data-qube-field="records.income_account">`));
+      assert.ok(bulk("income_account").includes(`<input type="hidden" class="qube-search-value qube-bulk-value" form="">`));
+      assert.ok(bulk("income_account").includes(`<button type="button" class="qube-bulk-apply">Apply</button>`));
+      assert.ok(bulk("item_type").includes(`<select class="qube-bulk-value" form=""><option value=""></option>`));
+      assert.ok(!bulk("list_id").includes("qube-bulk-apply"));
+      assert.ok(!bulk("memo").includes("qube-bulk-apply"));
+      // Each script once, with the nonce.
+      assert.strictEqual(html.split(kit.SEARCH_SCRIPT).length - 1, 1);
+      assert.strictEqual(html.split(kit.ROWS_SCRIPT).length - 1, 1);
+      assert.ok(html.includes(`<script nonce="n1">${kit.ROWS_SCRIPT}</script>`));
+      assert.ok(kit.SEARCH_SCRIPT.includes(`"&row=" + encodeURIComponent(row)`));
+    });
   });
 
   it("shows nothing for no run, or one that has stopped asking, and takes another CSRF field name", async () => {

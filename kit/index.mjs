@@ -60,6 +60,7 @@ export const {
   renderRunStatus,
   escapeHtml,
   SEARCH_SCRIPT,
+  ROWS_SCRIPT,
   get,
   rows,
   dig,

@@ -28,7 +28,7 @@ const REDELIVERY_REFUSED = Object.freeze({
   429: "That was asked a moment ago: give it a minute.",
 });
 const NO_ANSWER = "QuBe Sync didn't answer: try again in a minute.";
-const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100 });
+const SEARCH_LIMITS = Object.freeze({ minQuery: 2, maxQuery: 100, maxField: 100, maxRow: 200 });
 
 // The run a request names, with its operation and its record, once authorizeQuestion says true,
 // as { found: { run, operation, record } }; else { status }. Only true lets it through: a truthy
@@ -90,9 +90,9 @@ async function answerQuestion({ runId, form, request }) {
  * { status, json }: [] for a query under 2 or over 100 characters or a field name over 100
  * (nothing is asked), 404 [] for a run that isn't there or
  * authorizeQuestion doesn't allow, 409 [] when the question no longer searches, and QuBe Sync's
- * own 4xx with [].
+ * own 4xx with []. row is a rows field's row key (sent when 1 to 200 characters).
  */
-async function searchQuestion({ runId, field, q, request }) {
+async function searchQuestion({ runId, field, q, row, request }) {
   const { status, found } = await authorizedRun(runId, request, "a search");
   if (!found) return { status, json: [] };
   const links = found.run.links || {};
@@ -102,7 +102,8 @@ async function searchQuestion({ runId, field, q, request }) {
   if (!isSearchable(query, name)) return { status: 200, json: [] };
 
   try {
-    return { status: 200, json: await client().search(links.search, { field: name, q: query }) };
+    const rowKey = typeof row === "string" && row.length <= SEARCH_LIMITS.maxRow ? row : "";
+    return { status: 200, json: await client().search(links.search, { field: name, q: query, row: rowKey || null }) };
   } catch (err) {
     const refused = err instanceof APIError ? err.status : 0;
     if (refused < 400 || refused > 499) throw err;
@@ -166,13 +167,18 @@ function back(error) {
 
 /**
  * The choice's own fields from the form, each as its type: a checkbox true or false, a number as
- * a number (or as typed, for QuBe Sync's 422 to name), and a blank one left out. The form's
- * data[name] is read whether your app's urlencoded parser nests it or not.
+ * a number (or as typed, for QuBe Sync's 422 to name), and a blank one left out. A rows field is
+ * { row key: { column: value } } from data[name][row key][column], each row's asked columns only.
+ * The form's data[name] is read whether your app's urlencoded parser nests it or not.
  */
 function answerData(choice, form) {
   const nested = (form && typeof form.data === "object" && form.data) || {};
   const data = {};
   for (const field of choice.fields || []) {
+    if (field.type === "rows") {
+      data[field.name] = rowsData(field, form || {}, nested[field.name]);
+      continue;
+    }
     const flat = form ? form[`data[${field.name}]`] : undefined;
     const sent = flat !== undefined && flat !== null ? flat : nested[field.name];
     const text = String(sent === undefined || sent === null ? "" : sent).trim();
@@ -183,6 +189,31 @@ function answerData(choice, form) {
     }
   }
   return data;
+}
+
+// A rows field's answer: each row's filled columns, by row key. QuBe Sync drops a column the
+// row's other answers say doesn't apply, and names any required one left out.
+function rowsData(field, form, nestedField) {
+  const nested = isObject(nestedField) ? nestedField : {};
+  const rows = {};
+  for (const row of field.rows || []) {
+    const given = isObject(nested[row.key]) ? nested[row.key] : {};
+    const asked = row.columns || [];
+    const values = {};
+    for (const column of field.columns || []) {
+      if (!asked.includes(column.name)) continue;
+      const flat = form[`data[${field.name}][${row.key}][${column.name}]`];
+      const sent = flat !== undefined && flat !== null ? flat : given[column.name];
+      const text = typeof sent === "string" || typeof sent === "number" ? String(sent).trim() : "";
+      if (text) values[column.name] = column.type === "number" ? number(text) : text;
+    }
+    rows[row.key] = values;
+  }
+  return rows;
+}
+
+function isObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 // A whole number as an integer, a decimal as a number, and anything else as typed.
