@@ -254,6 +254,30 @@ describe("Client: runs", () => {
     assert.deepStrictEqual(pick(last()), ["GET", `/api/v2/connections/${CONN}/workflow-runs/${RUN}`, undefined]);
   });
 
+  it("getRequest by link or by ids, and responseXmlFor", async () => {
+    const link = `${base}/api/v2/connections/${CONN}/queued-requests/q1`;
+    await client().getRequest(link);
+    assert.deepStrictEqual(pick(last()), ["GET", `/api/v2/connections/${CONN}/queued-requests/q1`, undefined]);
+    await client().getRequest(CONN, "q1");
+    assert.strictEqual(last().path, `/api/v2/connections/${CONN}/queued-requests/q1`);
+    await assert.rejects(client().getRequest("https://qubesync.evil.com/api/v2/x"), TypeError);
+
+    const before = received.length;
+    const inline = qubesync.parse(JSON.stringify({ page_request_id: "q1", response_xml: "<QBXML/>" }));
+    assert.strictEqual(await client().responseXmlFor(inline), "<QBXML/>");
+    assert.strictEqual(received.length, before);
+
+    const omitted = qubesync.parse(JSON.stringify({
+      page_request_id: "q1", response_xml: null, response_xml_omitted: true, links: { self: link },
+    }));
+    answer({ json: { data: { id: "q1", response_xml: "<QBXML>big</QBXML>" } } });
+    assert.strictEqual(await client().responseXmlFor(omitted), "<QBXML>big</QBXML>");
+    assert.strictEqual(last().path, `/api/v2/connections/${CONN}/queued-requests/q1`);
+
+    const noLink = qubesync.parse(JSON.stringify({ page_request_id: "q1", response_xml_omitted: true }));
+    await assert.rejects(client().responseXmlFor(noLink), /links\.self/);
+  });
+
   it("listRuns drops missing filters", async () => {
     answer({ json: { data: [] } });
     assert.deepStrictEqual(await client().listRuns(CONN, { reference: "order-1042", outcome: "succeeded" }), []);
