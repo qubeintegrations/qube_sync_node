@@ -292,8 +292,9 @@ function handleDelivery(rawBody, signatureHeader) {
       // A paginated query is done when you hold pages 1..N for the page_request_id.
       if (alreadyProcessed(event.dedupeKey)) return 200;
       saveAnswer(event.pageRequestId, event.page, event.state, event.responseJson, event.error);
-      // event.perhapsApplied: timed_out, or a write's outcome_unknown error (event.errorType).
-      // QuickBooks may have applied it: query the record before sending a write again.
+      // event.perhapsApplied: timed_out, outcome_unknown or response_too_large (event.errorType).
+      // QuickBooks may have applied it: query the record before sending a write again. A query is
+      // safe to resend; page a response_too_large one (iterator, smaller max_returned) or narrow it.
       // event.responseXmlOmitted: the body was over 1 MB; await qube.responseXmlFor(event) fetches it.
       break;
 
@@ -366,9 +367,12 @@ read as `null`; nothing throws.
 `newerThan(stored)` is `true` when `stored` is `null` or `undefined`, else `revision > stored`.
 
 A request event is `perhapsApplied` when it `timed_out`, or ended in an `error` whose `errorType` is
-`outcome_unknown` (the Web Connector reported an error mid-write). QuickBooks may have saved it, so
-look before you send a create or an update again; a query is safe to resend. Other errors, such as
-a read's `unexpected_error`, are not.
+`outcome_unknown` (the Web Connector reported an error mid-write) or `response_too_large`
+(QuickBooks ran it, but its answer was too big to keep). QuickBooks may have saved it, so look
+before you send a create or an update again. A query is safe to resend; page a `response_too_large`
+one (`iterator` and a smaller `max_returned`), or narrow it when QuickBooks doesn't page it. Other
+errors, such as `quickbooks_business_error`, `xml_error` or a read's `unexpected_error`, are not,
+and neither is a `discarded` request.
 
 A request event whose body would be over 1 MB comes with `responseXml` null, `responseXmlOmitted`
 true and `selfLink` (its `links.self`). `responseJson` always comes. `await qube.responseXmlFor(event)`
@@ -892,14 +896,15 @@ class FindCustomer extends PlainRequest {
   // Every page 1..N is in. Optional.
   async done() {}
 
-  // error or discarded: show event.error.user_message.
+  // error or discarded: show event.error.user_message. Never one QuickBooks may have applied.
   async failed(event) {}
 
   // QuBe Sync keeps trying (QuickBooks closed, a dialog open). Never resend. Default: logs.
   async retrying(event) {}
 
-  // The answer never came back: QuickBooks may have applied it. Default: failed(event). A query
-  // can be queued again; check a write before resending it.
+  // QuickBooks may have applied it (event.perhapsApplied): timed_out, or an error whose
+  // errorType is outcome_unknown or response_too_large. Default: failed(event). Check
+  // QuickBooks before sending a write again; a query can be queued again (page a too-large one).
   async timedOut(event) {}
 }
 ```
@@ -926,6 +931,14 @@ connection id; before the queue's answer is saved, the first event's `id` is kep
 any order: `done` is called once, when every page from 1 to the one whose `iteration_state` is
 `done` is in (`not_applicable` is one page). A `retryable` isn't final, and one that arrives after
 its page's answer is skipped.
+
+`timedOut(event)` gets every final event QuickBooks may have applied though no answer says so
+(`event.perhapsApplied`): state `timed_out`, or state `error` with `errorType` `outcome_unknown`
+(the Web Connector reported an error mid-write) or `response_too_large` (QuickBooks ran it, but its
+answer was too big to keep). The row's `state` stays what QuBe Sync sent (`timed_out` or `error`).
+Look in QuickBooks before sending a write again. A query is safe to queue again; page a
+`response_too_large` one (`iterator` and a smaller `max_returned`), or narrow it. `failed(event)`
+gets the rest: other errors and `discarded`.
 
 A `QueuedRequest` keeps `operation` (the slug), `recordType`, `recordId`, `connectionId`,
 `reference`, `qubeId`, `params`, `state` (`queued`, `retryable`, `response_received`, `error`,

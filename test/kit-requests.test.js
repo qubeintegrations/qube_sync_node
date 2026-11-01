@@ -244,6 +244,56 @@ describe("kit: a plain request's webhooks", () => {
     assert.deepStrictEqual(calls, [["timedOut", "timed_out"]]);
   });
 
+  describe("a request QuickBooks may have applied", () => {
+    // timedOut records the error type, then runs the default (failed).
+    class Recording extends FindCustomer {
+      async timedOut(event) {
+        calls.push(["timedOut", event.errorType]);
+        return super.timedOut(event);
+      }
+    }
+
+    function refusedWith(errorType, state = "error") {
+      const error = JSON.parse(vectorBody("request: QuickBooks refused it")).error;
+      return { state, error: { ...error, error_type: errorType } };
+    }
+
+    async function setup() {
+      reset({ operations: { find_customer: Recording } });
+      const { connection, customer } = await fixtures();
+      return { connection, customer };
+    }
+
+    it("hands an outcome_unknown error to timedOut", async () => {
+      const { connection, customer } = await setup();
+      const row = await deliver(await makeRequest(customer, connection), "request: QuickBooks refused it", refusedWith("outcome_unknown"));
+      assert.deepStrictEqual(calls, [["timedOut", "outcome_unknown"], ["failed", "error"]]);
+      assert.strictEqual(row.state, "error");
+      assert.strictEqual(row.ended(), true);
+    });
+
+    it("hands a response_too_large error to timedOut", async () => {
+      const { connection, customer } = await setup();
+      await deliver(await makeRequest(customer, connection), "request: QuickBooks refused it", refusedWith("response_too_large"));
+      assert.deepStrictEqual(calls, [["timedOut", "response_too_large"], ["failed", "error"]]);
+    });
+
+    it("hands a timed_out to timedOut", async () => {
+      const { connection, customer } = await setup();
+      await deliver(await makeRequest(customer, connection), "request: an answer that never came back");
+      assert.deepStrictEqual(calls, [["timedOut", "timed_out"], ["failed", "timed_out"]]);
+    });
+
+    it("hands a quickbooks_business_error and a discarded to failed only", async () => {
+      const { connection, customer } = await setup();
+      await deliver(await makeRequest(customer, connection), "request: QuickBooks refused it");
+      assert.deepStrictEqual(calls, [["failed", "error"]]);
+      const discarded = await deliver(await makeRequest(customer, connection), "request: QuickBooks refused it", refusedWith("discarded", "discarded"));
+      assert.deepStrictEqual(calls, [["failed", "error"], ["failed", "discarded"]]);
+      assert.strictEqual(discarded.state, "discarded");
+    });
+  });
+
   it("skips an event whose id isn't the row's qubeId, and one that isn't a request's", async () => {
     reset();
     const { connection, customer } = await fixtures();

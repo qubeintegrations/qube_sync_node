@@ -18,6 +18,11 @@ reader returns goes in the minor number.
   string: `event.error === "text"`, `typeof event.error === "string"`, and string methods such as
   `event.error.includes(...)`; use `event.error.message`.
 - The kit still stores a failed run's `error` as the body carried it.
+- A plain request QuickBooks may have applied reaches the kit's `timedOut(event)`, not
+  `failed(event)`: routing follows `event.perhapsApplied`, so an `error` whose `errorType` is
+  `outcome_unknown` or `response_too_large` goes there as a `timed_out` does. Check QuickBooks
+  before sending a write again; a query can be queued again (page a too-large one). `failed`
+  never gets one of those. The hook keeps its name, and its default still calls `failed`.
 
 ### Added
 
@@ -31,8 +36,10 @@ reader returns goes in the minor number.
   as they come, so `push_records`' `pushed` / `pushed_with_errors` outcomes and their `items` and
   `counts` need no change here; `output.outcome` is gone, so read `event.outcome`.
 - `RequestEvent#perhapsApplied`: true for a `timed_out` request and for an `error` with `errorType`
-  `outcome_unknown`, QuBe Sync's type for a write the Web Connector reported an error on
-  mid-request. QuickBooks may have applied either, so look before sending a write again.
+  `outcome_unknown` (QuBe Sync's type for a write the Web Connector reported an error on
+  mid-request) or `response_too_large` (QuickBooks ran it, but its answer was too big to keep).
+  QuickBooks may have applied any of them, so look before sending a write again. A query is safe
+  to resend; page a `response_too_large` one (`iterator`, a smaller `max_returned`) or narrow it.
   `errorType` reads `error.error_type`.
 - A request webhook whose body would be over 1 MB comes with `responseXml` null,
   `responseXmlOmitted` true and `links.self` (a v1 or v2 URL, as the request was queued).

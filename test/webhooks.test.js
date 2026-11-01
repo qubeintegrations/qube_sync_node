@@ -373,6 +373,11 @@ describe("events", () => {
     assert.strictEqual(event("timed_out").perhapsApplied, true);
     assert.strictEqual(event("error", "outcome_unknown").perhapsApplied, true);
     assert.strictEqual(event("error", "outcome_unknown").errorType, "outcome_unknown");
+    assert.strictEqual(event("error", "response_too_large").perhapsApplied, true);
+    assert.strictEqual(event("error", "quickbooks_business_error").perhapsApplied, false);
+    assert.strictEqual(event("error", "xml_error").perhapsApplied, false);
+    assert.strictEqual(event("discarded", "discarded").perhapsApplied, false);
+    assert.strictEqual(event("discarded").perhapsApplied, false);
     assert.strictEqual(event("error", "unexpected_error").perhapsApplied, false);
     assert.strictEqual(event("retryable", "retryable").perhapsApplied, false);
     assert.strictEqual(event("response_received").perhapsApplied, false);

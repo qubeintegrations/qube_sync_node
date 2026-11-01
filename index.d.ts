@@ -64,7 +64,7 @@ export declare class RequestEvent extends Event {
   readonly links: JsonObject | null;
   /** `error.error_type` (`"timed_out"`, `"outcome_unknown"`, ...); null without an error. */
   readonly errorType: string | null;
-  /** QuickBooks may have applied it: `timed_out`, or a write's `outcome_unknown` error. Query the record before sending a write again. */
+  /** QuickBooks may have applied it: `timed_out`, or an `outcome_unknown` or `response_too_large` error. Query the record before sending a write again; a query is safe to resend (page or narrow a too-large one). */
   readonly perhapsApplied: boolean;
   /** True when the body was over 1 MB, so `responseXml` is null; fetch `selfLink`. */
   readonly responseXmlOmitted: boolean;
