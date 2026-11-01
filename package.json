@@ -1,6 +1,6 @@
 {
   "name": "qubesync",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The QuBe Sync v2 API client, webhook verification and parsing, and the integration kit (qubesync/kit, qubesync/express): QuickBooks Desktop through qubesync.com.",
   "license": "MIT",
   "author": "QuBe Sync",

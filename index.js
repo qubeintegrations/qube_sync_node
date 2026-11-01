@@ -5,7 +5,7 @@
 
 const crypto = require("crypto");
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const SIGNATURE_HEADER = "X-QUBE-Signature";
 const DEFAULT_TOLERANCE = 300;
 const REASONS = Object.freeze(["missing", "malformed", "stale", "mismatch"]);
@@ -151,8 +151,15 @@ class WorkflowRunEvent extends Event {
   get workflow() {
     return own(this.body, "workflow");
   }
+  get workflowId() {
+    return own(this.body, "workflow_id");
+  }
   get connectionId() {
     return own(this.body, "connection_id");
+  }
+  /** One plain sentence for a person; never parse it. */
+  get headline() {
+    return own(this.body, "headline");
   }
   get prompt() {
     return own(this.body, "prompt");
@@ -163,8 +170,9 @@ class WorkflowRunEvent extends Event {
   get output() {
     return own(this.body, "output");
   }
+  /** A WorkflowRunError, or null; `body.error` is the raw value. */
   get error() {
-    return own(this.body, "error");
+    return WorkflowRunError.from(own(this.body, "error"));
   }
   get summary() {
     return own(this.body, "summary");
@@ -177,6 +185,40 @@ class WorkflowRunEvent extends Event {
   }
   newerThan(storedRevision) {
     return newerThan(this.revision, storedRevision);
+  }
+}
+
+// What failed a workflow run. All but `message` may be null; toJSON keeps the wire's keys.
+class WorkflowRunError {
+  /** From a body's `error`: an object, or an older server's String (only `message`). Null otherwise. */
+  static from(value) {
+    if (typeof value === "string") return new WorkflowRunError({ message: value });
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    return new WorkflowRunError({
+      code: own(value, "code"),
+      type: own(value, "type"),
+      message: own(value, "message"),
+      quickbooksMessage: own(value, "quickbooks_message"),
+      hint: own(value, "hint"),
+    });
+  }
+
+  constructor({ code = null, type = null, message = null, quickbooksMessage = null, hint = null } = {}) {
+    this.code = code;
+    this.type = type;
+    this.message = message;
+    this.quickbooksMessage = quickbooksMessage;
+    this.hint = hint;
+    Object.freeze(this);
+  }
+
+  toString() {
+    return this.message === null ? "" : String(this.message);
+  }
+
+  toJSON() {
+    const { code, type, message, quickbooksMessage, hint } = this;
+    return { code, type, message, quickbooks_message: quickbooksMessage, hint };
   }
 }
 
@@ -212,6 +254,9 @@ class NotificationEvent extends Event {
   }
   get data() {
     return own(this.body, "data");
+  }
+  get headline() {
+    return own(this.body, "headline");
   }
   get dedupeKey() {
     return this.deliveryId;
@@ -424,6 +469,7 @@ module.exports = {
   Event,
   RequestEvent,
   WorkflowRunEvent,
+  WorkflowRunError,
   NotificationEvent,
   ConnectionEvent,
   NameIndexEvent,

@@ -302,6 +302,7 @@ function handleDelivery(rawBody, signatureHeader) {
       // apply one only when it's newer than the revision you stored for the run.
       if (!event.newerThan(storedRunRevision(event.runId))) return 200;
       saveRun(event.runId, event.reference, event.revision, event.runState, event.output, event.prompt);
+      // event.headline, event.outcome, event.summary.changes, and when failed, event.error.message.
       break;
 
     case "notification":
@@ -356,8 +357,8 @@ read as `null`; nothing throws.
 | `type` | when | also |
 | --- | --- | --- |
 | `request` | no `event`, has `page_request_id` | `id`, `pageRequestId`, `state`, `page`, `iterationState`, `responseJson`, `responseXml`, `error`, `errorType`, `links`, `selfLink`, `perhapsApplied`, `responseXmlOmitted`; `dedupeKey` is `"<page_request_id>:<state>"` |
-| `workflow_run` | `workflow_run.awaiting_input`, `.completed`, `.failed`, `.cancelled` | `runId`, `reference`, `revision`, `runState`, `workflow`, `connectionId`, `prompt`, `outcome`, `output`, `error`, `summary`, `cancelReason`, `links`, `newerThan(stored)` |
-| `notification` | `workflow_run.notification` | `runId`, `reference`, `revision`, `deliveryId`, `seq`, `name`, `state`, `from`, `data`; `dedupeKey` is the delivery id; no `newerThan` |
+| `workflow_run` | `workflow_run.awaiting_input`, `.completed`, `.failed`, `.cancelled` | `runId`, `reference`, `revision`, `runState`, `workflow`, `workflowId`, `connectionId`, `headline`, `prompt`, `outcome`, `output`, `error` (a `WorkflowRunError`), `summary`, `cancelReason`, `links`, `newerThan(stored)` |
+| `notification` | `workflow_run.notification` | `runId`, `reference`, `revision`, `deliveryId`, `seq`, `name`, `state`, `from`, `data`, `headline`; `dedupeKey` is the delivery id; no `newerThan` |
 | `connection` | `connection.*` | `deliveryId`, `revision`, `connection`, `connectionId`, `stallReason`, `newerThan(stored)`; `dedupeKey` is the delivery id |
 | `name_index` | `name_index.*` | `connectionId`, `nameIndex` |
 | `unknown` | anything else | the common fields only |
@@ -372,7 +373,26 @@ a read's `unexpected_error`, are not.
 A request event whose body would be over 1 MB comes with `responseXml` null, `responseXmlOmitted`
 true and `selfLink` (its `links.self`). `responseJson` always comes. `await qube.responseXmlFor(event)`
 returns the event's `responseXml`, or fetches it from `selfLink` when it was omitted;
-`qube.getRequest(event.selfLink)` returns the whole request.
+`qube.getRequest(event.selfLink)` returns the whole request. `links.self` may be a v1 or a v2 URL,
+depending on whether the request was queued through v1 or v2.
+
+Workflow run and notification events have `headline`, one plain sentence for a person (a log line,
+a status on your page). Never parse it: branch on `event`, `outcome`, `output` and `error`.
+`workflowId` is the workflow's id, null once that workflow is deleted and for a built-in chart.
+
+A failed run's `error` is a `WorkflowRunError` with `code` (QuickBooks' status code, such as 3100),
+`type` (a stable name to branch on, such as `name_in_use`), `message` (safe to show),
+`quickbooksMessage` and `hint`; all but `message` may be null. `String(event.error)` is the message.
+An error from an older server, a string, reads as one with only `message`; `event.body.error` is
+the raw value. `JSON.stringify(event.error)` keeps every field with the wire's keys
+(`quickbooks_message`), so it can be stored as it is.
+
+Each outcome has its own `output`, with only the keys that ending sets; read `event.outcome`, not
+`output.outcome`. `push_records` ends `pushed` or `pushed_with_errors`, with `output.items` (one per
+record, a failed one with its own `error` object) and `output.counts`. On the endings,
+`summary.changes` lists what the run changed in QuickBooks. `links` holds only the links that work:
+`decisions` and `search` only while the run is `awaiting_input`, `cancel` until it ends. The library
+passes `output`, `summary` and `prompt` through as they come.
 
 ### Express
 
