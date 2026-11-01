@@ -287,6 +287,34 @@ describe("events", () => {
     assert.strictEqual(request.responseJson.data.length, 2);
   });
 
+  it("flags a request QuickBooks may have applied", () => {
+    const event = (state, errorType) => parse(JSON.stringify({
+      page_request_id: "q1", state, ...(errorType ? { error: { error_type: errorType } } : {}),
+    }));
+    assert.strictEqual(event("timed_out", "timed_out").perhapsApplied, true);
+    assert.strictEqual(event("timed_out").perhapsApplied, true);
+    assert.strictEqual(event("error", "outcome_unknown").perhapsApplied, true);
+    assert.strictEqual(event("error", "outcome_unknown").errorType, "outcome_unknown");
+    assert.strictEqual(event("error", "unexpected_error").perhapsApplied, false);
+    assert.strictEqual(event("retryable", "retryable").perhapsApplied, false);
+    assert.strictEqual(event("response_received").perhapsApplied, false);
+    assert.strictEqual(event("response_received").errorType, null);
+    assert.strictEqual(parse(JSON.stringify({ page_request_id: "q1", error: "text" })).errorType, null);
+  });
+
+  it("reads an answer over 1 MB that came without its response_xml", () => {
+    const big = parse(eventCase("request: an answer too large to carry its qbXML").body);
+    assert.strictEqual(big.responseXmlOmitted, true);
+    assert.strictEqual(big.responseXml, null);
+    assert.match(big.selfLink, /\/queued-requests\/0196a1c0-0000-7000-8000-00000000e001$/);
+    assert.strictEqual(big.responseJson.status, "success");
+
+    const small = parse(JSON.stringify({ page_request_id: "q1", response_xml: "<QBXML/>" }));
+    assert.strictEqual(small.responseXmlOmitted, false);
+    assert.strictEqual(small.responseXml, "<QBXML/>");
+    assert.strictEqual(small.selfLink, null);
+  });
+
   it("parse refuses a body that isn't a JSON object", () => {
     assert.throws(() => parse("[1,2]"), TypeError);
     assert.throws(() => parse("null"), TypeError);

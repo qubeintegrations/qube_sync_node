@@ -92,8 +92,32 @@ class RequestEvent extends Event {
   get responseJson() {
     return own(this.body, "response_json");
   }
+  get responseXml() {
+    return own(this.body, "response_xml");
+  }
   get error() {
     return own(this.body, "error");
+  }
+  get links() {
+    return own(this.body, "links");
+  }
+  /** `error.error_type` ("timed_out", "outcome_unknown", ...), null without an error. */
+  get errorType() {
+    return own(this.error, "error_type");
+  }
+  /** QuickBooks may have applied it: timed_out, or a write's outcome_unknown error. Look before resending a write. */
+  get perhapsApplied() {
+    const type = this.errorType;
+    return this.state === "timed_out" || type === "timed_out" || type === "outcome_unknown";
+  }
+  /** True when the body was over 1 MB, so `responseXml` is null; fetch `selfLink`. */
+  get responseXmlOmitted() {
+    return own(this.body, "response_xml_omitted") === true;
+  }
+  /** `links.self`, the request's URL; sent with an omitted `responseXml`. */
+  get selfLink() {
+    const link = own(this.links, "self");
+    return typeof link === "string" ? link : null;
   }
   get dedupeKey() {
     const pageRequestId = this.pageRequestId;

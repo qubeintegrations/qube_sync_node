@@ -188,7 +188,7 @@ qbXML as written:
 await qube.queueQbxml(connectionId, requestXml, { webhookUrl: "https://app.example.com/webhooks/qube" });
 ```
 
-Also `getRequest(connectionId, id)`, `requestPages(connectionId, id)`, `discardRequest(connectionId, id)`,
+Also `getRequest(connectionId, id)` (or `getRequest(url)`), `requestPages(connectionId, id)`, `discardRequest(connectionId, id)`,
 and `listRequests(connectionId, { page, pageSize, state, webhookState, sort, sortDirection, searchPhrase })`,
 which returns the whole body, `{ data, meta: { page, total_pages } }`. To walk every page:
 
@@ -292,6 +292,9 @@ function handleDelivery(rawBody, signatureHeader) {
       // A paginated query is done when you hold pages 1..N for the page_request_id.
       if (alreadyProcessed(event.dedupeKey)) return 200;
       saveAnswer(event.pageRequestId, event.page, event.state, event.responseJson, event.error);
+      // event.perhapsApplied: timed_out, or a write's outcome_unknown error (event.errorType).
+      // QuickBooks may have applied it: query the record before sending a write again.
+      // event.responseXmlOmitted: the body was over 1 MB; await qube.responseXmlFor(event) fetches it.
       break;
 
     case "workflow_run":
@@ -352,7 +355,7 @@ read as `null`; nothing throws.
 
 | `type` | when | also |
 | --- | --- | --- |
-| `request` | no `event`, has `page_request_id` | `id`, `pageRequestId`, `state`, `page`, `iterationState`, `responseJson`, `error`; `dedupeKey` is `"<page_request_id>:<state>"` |
+| `request` | no `event`, has `page_request_id` | `id`, `pageRequestId`, `state`, `page`, `iterationState`, `responseJson`, `responseXml`, `error`, `errorType`, `links`, `selfLink`, `perhapsApplied`, `responseXmlOmitted`; `dedupeKey` is `"<page_request_id>:<state>"` |
 | `workflow_run` | `workflow_run.awaiting_input`, `.completed`, `.failed`, `.cancelled` | `runId`, `reference`, `revision`, `runState`, `workflow`, `connectionId`, `prompt`, `outcome`, `output`, `error`, `summary`, `cancelReason`, `links`, `newerThan(stored)` |
 | `notification` | `workflow_run.notification` | `runId`, `reference`, `revision`, `deliveryId`, `seq`, `name`, `state`, `from`, `data`; `dedupeKey` is the delivery id; no `newerThan` |
 | `connection` | `connection.*` | `deliveryId`, `revision`, `connection`, `connectionId`, `stallReason`, `newerThan(stored)`; `dedupeKey` is the delivery id |
@@ -360,6 +363,16 @@ read as `null`; nothing throws.
 | `unknown` | anything else | the common fields only |
 
 `newerThan(stored)` is `true` when `stored` is `null` or `undefined`, else `revision > stored`.
+
+A request event is `perhapsApplied` when it `timed_out`, or ended in an `error` whose `errorType` is
+`outcome_unknown` (the Web Connector reported an error mid-write). QuickBooks may have saved it, so
+look before you send a create or an update again; a query is safe to resend. Other errors, such as
+a read's `unexpected_error`, are not.
+
+A request event whose body would be over 1 MB comes with `responseXml` null, `responseXmlOmitted`
+true and `selfLink` (its `links.self`). `responseJson` always comes. `await qube.responseXmlFor(event)`
+returns the event's `responseXml`, or fetches it from `selfLink` when it was omitted;
+`qube.getRequest(event.selfLink)` returns the whole request.
 
 ### Express
 

@@ -445,8 +445,18 @@ class Client {
     });
   }
 
-  async getRequest(connectionId, id) {
+  async getRequest(connectionIdOrUrl, id) {
+    if (id === undefined || id === null) return this.#data("GET", requireString(connectionIdOrUrl, "requestUrl"));
+    const connectionId = connectionIdOrUrl;
     return this.#data("GET", `/connections/${requireId(connectionId, "connectionId")}/queued-requests/${requireId(id, "id")}`);
+  }
+
+  /** The event's `responseXml`, or, when it was omitted for size, the one fetched from `selfLink`. */
+  async responseXmlFor(event) {
+    if (!event.responseXmlOmitted) return event.responseXml;
+    if (!event.selfLink) throw new TypeError("responseXml was omitted but the event has no links.self");
+    const request = await this.getRequest(event.selfLink);
+    return isPlainObject(request) && typeof request.response_xml === "string" ? request.response_xml : null;
   }
 
   async requestPages(connectionId, id) {

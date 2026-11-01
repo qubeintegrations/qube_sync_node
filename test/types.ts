@@ -166,6 +166,7 @@ async function useClient(): Promise<void> {
   await alone.create("c", { name: "Net 30" }, { webhookUrl: "https://app.test/h" });
   await client.queueQbxml("c", "<QBXML/>", { webhookUrl: "https://app.test/h" });
   await client.getRequest("c", "q");
+  await client.getRequest("https://qubesync.com/api/v2/connections/c/queued-requests/q");
   await client.requestPages("c", "q");
   const page: RequestsPage = await client.listRequests("c", { page: 1, pageSize: 50, state: "errored", webhookState: "failed", sort: "inserted_at", sortDirection: "desc", searchPhrase: "A" });
   const total: number = page.meta.total_pages;

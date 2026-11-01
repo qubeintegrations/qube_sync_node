@@ -58,7 +58,18 @@ export declare class RequestEvent extends Event {
   readonly page: number | null;
   readonly iterationState: string | null;
   readonly responseJson: JsonValue;
+  /** The raw qbXML answer; null when `responseXmlOmitted`. */
+  readonly responseXml: string | null;
   readonly error: JsonValue;
+  readonly links: JsonObject | null;
+  /** `error.error_type` (`"timed_out"`, `"outcome_unknown"`, ...); null without an error. */
+  readonly errorType: string | null;
+  /** QuickBooks may have applied it: `timed_out`, or a write's `outcome_unknown` error. Query the record before sending a write again. */
+  readonly perhapsApplied: boolean;
+  /** True when the body was over 1 MB, so `responseXml` is null; fetch `selfLink`. */
+  readonly responseXmlOmitted: boolean;
+  /** `links.self`, the request's URL; sent with an omitted `responseXml`. */
+  readonly selfLink: string | null;
   /** `"<page_request_id>:<state>"`. */
   readonly dedupeKey: string | null;
 }
@@ -402,6 +413,10 @@ export declare class Client {
   queue(operationId: string, connectionId: string, params: ApiObject | undefined, options: QueueOptions): Promise<QueuedRequest>;
   queueQbxml(connectionId: string, requestXml: string, options: QueueQbxmlOptions): Promise<ApiObject>;
   getRequest(connectionId: string, id: string): Promise<ApiObject>;
+  /** A request by its URL, such as a webhook's `links.self` (`event.selfLink`). */
+  getRequest(requestUrl: string): Promise<ApiObject>;
+  /** A request webhook's `responseXml`: the event's own, or fetched from `selfLink` when it was omitted for size. */
+  responseXmlFor(event: RequestEvent): Promise<string | null>;
   requestPages(connectionId: string, id: string): Promise<ApiObject[]>;
   /** The whole body, `{ data, meta: { page, total_pages } }`. */
   listRequests(connectionId: string, filters?: ListRequestsFilters): Promise<RequestsPage>;

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- `RequestEvent#perhapsApplied`: true for a `timed_out` request and for an `error` with `errorType`
+  `outcome_unknown`, QuBe Sync's type for a write the Web Connector reported an error on
+  mid-request. QuickBooks may have applied either, so look before sending a write again.
+  `errorType` reads `error.error_type`.
+- A request webhook whose body would be over 1 MB comes with `responseXml` null,
+  `responseXmlOmitted` true and `links.self`. `RequestEvent#responseXml`, `#responseXmlOmitted`,
+  `#links` and `#selfLink` read them; `client.responseXmlFor(event)` returns the event's
+  `responseXml`, fetching it from `links.self` when it was omitted.
+- `client.getRequest(url)` takes a request's URL (such as `links.self`), as `getRun` does.
+  `getRequest(connectionId, id)` works as before.
+
 ## 0.3.0 (2026-10-27)
 
 Adds the integration kit (`qubesync/kit` and `qubesync/express`), typed workflow starts,
