@@ -835,11 +835,11 @@ export declare class PlainRequest<R extends QubeRecord = QubeRecord> {
   answered(event: RequestEvent): Promise<void>;
   /** Every page 1..N answered. Called once. */
   done(): Promise<void>;
-  /** error or discarded. */
+  /** error or discarded. Never one QuickBooks may have applied (event.perhapsApplied). */
   failed(event: RequestEvent): Promise<void>;
   /** QuBe Sync keeps trying. Never resend. */
   retrying(event: RequestEvent): Promise<void>;
-  /** The answer never came back. Default: failed(event). */
+  /** QuickBooks may have applied it (event.perhapsApplied). Check a write before resending it. Default: failed(event). */
   timedOut(event: RequestEvent): Promise<void>;
   /** Takes a delivery once by page_request_id:state, under the request's lock. */
   handle(event: QubeEvent): Promise<void>;

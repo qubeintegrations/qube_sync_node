@@ -143,7 +143,7 @@ class PlainRequest {
   /** Every page 1..N answered. Called once. */
   async done() {}
 
-  /** error or discarded: event.error.user_message is safe to show. */
+  /** error or discarded: event.error.user_message is safe to show. Never one event.perhapsApplied (timedOut gets those). */
   async failed(event) {
     this.logEvent(event);
   }
@@ -153,7 +153,7 @@ class PlainRequest {
     this.logEvent(event);
   }
 
-  /** QuickBooks may have applied it. A query can be queued again; check a write first. */
+  /** QuickBooks may have applied it (timed_out, outcome_unknown, response_too_large): check a write before resending it. A query can be queued again; page a too-large one. */
   async timedOut(event) {
     return this.failed(event);
   }
@@ -250,7 +250,7 @@ class PlainRequest {
       row.error = event.error;
       row.endedAt = new Date();
     }
-    if (event.state === "timed_out") await this.timedOut(event);
+    if (event.perhapsApplied) await this.timedOut(event);
     else await this.failed(event);
   }
 }

@@ -70,6 +70,9 @@ class Event {
 
 class UnknownEvent extends Event {}
 
+// Look before sending a write again; a query is safe to resend (page or narrow a too-large one).
+const PERHAPS_APPLIED_ERROR_TYPES = Object.freeze(["timed_out", "outcome_unknown", "response_too_large"]);
+
 class RequestEvent extends Event {
   get type() {
     return "request";
@@ -105,10 +108,9 @@ class RequestEvent extends Event {
   get errorType() {
     return own(this.error, "error_type");
   }
-  /** QuickBooks may have applied it: timed_out, or a write's outcome_unknown error. Look before resending a write. */
+  /** QuickBooks may have applied it (timed_out, outcome_unknown, response_too_large). Look before resending a write. */
   get perhapsApplied() {
-    const type = this.errorType;
-    return this.state === "timed_out" || type === "timed_out" || type === "outcome_unknown";
+    return this.state === "timed_out" || PERHAPS_APPLIED_ERROR_TYPES.includes(this.errorType);
   }
   /** True when the body was over 1 MB, so `responseXml` is null; fetch `selfLink`. */
   get responseXmlOmitted() {
