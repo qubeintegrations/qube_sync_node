@@ -509,7 +509,7 @@ describe("kit: a run's events", () => {
     reset();
     const { run } = await fixtures();
     let after = await runEvent(run, "workflow_run.failed", { revision: 2 });
-    assert.strictEqual(after.error, JSON.parse(vectorBody("workflow_run.failed")).error);
+    assert.deepStrictEqual(after.error, JSON.parse(vectorBody("workflow_run.failed")).error);
     after = await runEvent(run, "workflow_run.cancelled", { revision: 3 });
     assert.deepStrictEqual(calls, [["failed", "workflow_run.failed"], ["failed", "workflow_run.cancelled"]]);
     assert.deepStrictEqual([after.state, after.cancelReason], ["cancelled", "The customer was merged in our CRM."]);

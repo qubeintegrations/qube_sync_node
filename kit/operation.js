@@ -369,7 +369,7 @@ class Operation {
     run.outcome = event.outcome;
     if (Operation.#ended(event)) {
       run.endedAt = run.endedAt || new Date();
-      if (event.event === "workflow_run.failed") run.error = event.error;
+      if (event.event === "workflow_run.failed") run.error = rawError(event);
       if (event.event === "workflow_run.cancelled") run.cancelReason = event.cancelReason;
     }
 
@@ -435,6 +435,12 @@ class Operation {
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// The failure's error as the body carried it (event.error is a WorkflowRunError).
+function rawError(event) {
+  const error = event.body && event.body.error;
+  return error === undefined ? null : error;
 }
 
 // A value as JSON reads it back (undefined as null).

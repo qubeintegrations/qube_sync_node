@@ -81,11 +81,18 @@ export declare class WorkflowRunEvent extends Event {
   readonly runId: string | null;
   readonly runState: string | null;
   readonly workflow: string | null;
+  /** The workflow's id; null once it's deleted, and for a built-in chart. */
+  readonly workflowId: string | null;
   readonly connectionId: string | null;
+  /** What happened, one plain sentence for a person. Never parse it. */
+  readonly headline: string | null;
   readonly prompt: JsonObject | null;
   readonly outcome: string | null;
+  /** The ending's own keys: each outcome sets its own. */
   readonly output: JsonValue;
-  readonly error: JsonValue;
+  /** What failed the run (on `workflow_run.failed`); null otherwise. `body.error` is the raw value. */
+  readonly error: WorkflowRunError | null;
+  /** On the endings: `changes`, `decisions`, `ended_at`, and `stopped_at` on a failure or cancel. */
   readonly summary: JsonObject | null;
   readonly cancelReason: string | null;
   readonly links: JsonObject | null;
@@ -93,6 +100,44 @@ export declare class WorkflowRunEvent extends Event {
   readonly dedupeKey: null;
   /** True when `storedRevision` is null/undefined, else `revision > storedRevision`. */
   newerThan(storedRevision: number | null | undefined): boolean;
+}
+
+/** The fields of a workflow run's `error`, as the constructor takes them. */
+export interface WorkflowRunErrorFields {
+  code?: number | null;
+  type?: string | null;
+  message?: string | null;
+  quickbooksMessage?: string | null;
+  hint?: string | null;
+}
+
+/** A workflow run's `error`, serialized by `toJSON` with the wire's keys. */
+export interface WorkflowRunErrorJson {
+  code: number | null;
+  type: string | null;
+  message: string | null;
+  quickbooks_message: string | null;
+  hint: string | null;
+}
+
+/** What failed a workflow run. All but `message` may be null. Frozen. */
+export declare class WorkflowRunError {
+  /** From a body's `error`: an object, or an older server's string (only `message`); null for anything else. */
+  static from(value: unknown): WorkflowRunError | null;
+  constructor(fields?: WorkflowRunErrorFields);
+  /** QuickBooks' status code (3100), when a QuickBooks answer failed the run. */
+  readonly code: number | null;
+  /** A stable name to branch on (`name_in_use`, `no_response`, or the failure outcome's key). */
+  readonly type: string | null;
+  /** One plain sentence, safe to show. Null only from a malformed body. */
+  readonly message: string | null;
+  /** QuickBooks' own text, when it answered with the error. */
+  readonly quickbooksMessage: string | null;
+  /** What usually fixes it. */
+  readonly hint: string | null;
+  /** The message, or "". */
+  toString(): string;
+  toJSON(): WorkflowRunErrorJson;
 }
 
 /** `workflow_run.notification`: data a run sends along the way. Never skipped by revision. */
@@ -106,6 +151,8 @@ export declare class NotificationEvent extends Event {
   readonly state: string | null;
   readonly from: JsonObject | null;
   readonly data: JsonValue;
+  /** One plain sentence for a person. Never parse it. */
+  readonly headline: string | null;
   /** The `delivery_id`. */
   readonly dedupeKey: string | null;
 }

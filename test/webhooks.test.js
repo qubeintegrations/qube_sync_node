@@ -7,7 +7,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const qubesync = require("..");
-const { verify, parse, SignatureError, Event, WorkflowRunEvent, ConnectionEvent } = qubesync;
+const { verify, parse, SignatureError, Event, WorkflowRunEvent, WorkflowRunError, ConnectionEvent } = qubesync;
 
 const vectors = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "test_vectors.json"), "utf8"));
 const SECRET = vectors.secrets[0];
@@ -209,6 +209,7 @@ describe("events", () => {
     for (const key of [
       "timestamp", "appId", "sandbox", "runId", "reference", "revision", "runState", "workflow",
       "connectionId", "prompt", "outcome", "output", "error", "summary", "cancelReason", "links", "dedupeKey",
+      "workflowId", "headline",
     ]) {
       assert.strictEqual(run[key], null, key);
     }
@@ -259,7 +260,8 @@ describe("events", () => {
     assert.strictEqual(awaiting.timestamp, T);
 
     assert.strictEqual(parse(eventCase("workflow_run.completed").body).outcome, "used_existing");
-    assert.match(parse(eventCase("workflow_run.failed").body).error, /renames/);
+    assert.match(parse(eventCase("workflow_run.failed").body).error.message, /renames/);
+    assert.strictEqual(awaiting.workflowId, "0196a1c0-0000-7000-8000-00000000f0a1");
     assert.strictEqual(parse(eventCase("workflow_run.cancelled").body).cancelReason, "The customer was merged in our CRM.");
 
     const note = parse(eventCase("workflow_run.notification").body);
@@ -269,6 +271,7 @@ describe("events", () => {
     assert.strictEqual(note.from.workflow, "stream_query");
     assert.strictEqual(note.data.kind, "customer");
     assert.strictEqual(note.deliveryId, note.dedupeKey);
+    assert.strictEqual(note.headline, "pull_changes sent page.");
 
     const stalled = parse(eventCase("connection.stalled").body);
     assert.strictEqual(stalled.connectionId, "0196a1c0-0000-7000-8000-00000000c001");
@@ -285,6 +288,81 @@ describe("events", () => {
     assert.strictEqual(request.iterationState, "continue");
     assert.strictEqual(request.pageRequestId, "0196a1c0-0000-7000-8000-00000000e002");
     assert.strictEqual(request.responseJson.data.length, 2);
+  });
+
+  it("reads every workflow run event's and notification's headline", () => {
+    const cases = vectors.events.filter((c) => c.name.startsWith("workflow_run."));
+    assert.strictEqual(cases.length, 5);
+    for (const c of cases) {
+      const headline = parse(c.body).headline;
+      assert.strictEqual(typeof headline, "string", c.name);
+      assert.strictEqual(headline, JSON.parse(c.body).headline, c.name);
+    }
+    assert.strictEqual(parse('{"event":"workflow_run.notification"}').headline, null);
+  });
+
+  it("reads workflowId, null once the workflow is deleted", () => {
+    assert.strictEqual(parse('{"event":"workflow_run.completed","workflow_id":"w1"}').workflowId, "w1");
+    assert.strictEqual(parse('{"event":"workflow_run.completed","workflow_id":null}').workflowId, null);
+  });
+
+  describe("a failed run's error", () => {
+    const failed = () => parse(eventCase("workflow_run.failed").body);
+    const run = (error) => parse(JSON.stringify({ event: "workflow_run.failed", error }));
+
+    it("is a WorkflowRunError with the object's fields", () => {
+      const event = failed();
+      const error = event.error;
+      assert.ok(error instanceof WorkflowRunError);
+      assert.match(error.message, /^Five renames were tried/);
+      assert.deepStrictEqual([error.code, error.type, error.quickbooksMessage, error.hint], [null, null, null, null]);
+      assert.strictEqual(error["message"], error.message);
+      assert.strictEqual(String(error), error.message);
+      assert.strictEqual(`${error}`, error.message);
+      assert.ok(Object.isFrozen(error));
+      assert.strictEqual(typeof event.body.error, "object");
+    });
+
+    it("reads QuickBooks' code, type, text and hint", () => {
+      const error = run({
+        code: 3100, type: "name_in_use", message: "That name is already in use.",
+        quickbooks_message: 'The name "Acme" of the list element is already in use.', hint: "Pick another name.",
+      }).error;
+      assert.deepStrictEqual(
+        [error.code, error.type, error.message, error.hint],
+        [3100, "name_in_use", "That name is already in use.", "Pick another name."]
+      );
+      assert.match(error.quickbooksMessage, /already in use/);
+    });
+
+    it("serializes every field with the wire's keys", () => {
+      const event = failed();
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(event.error)), event.body.error);
+      const full = { code: 3100, type: "name_in_use", message: "m", quickbooks_message: "q", hint: "h" };
+      assert.deepStrictEqual(run(full).error.toJSON(), full);
+      assert.strictEqual(JSON.stringify(run(full).error), JSON.stringify(full));
+      assert.deepStrictEqual(run({ message: "only" }).error.toJSON(), { code: null, type: null, message: "only", quickbooks_message: null, hint: null });
+    });
+
+    it("reads an older server's String error as one with only a message, without throwing", () => {
+      const event = run("Riverbend failed");
+      const error = event.error;
+      assert.ok(error instanceof WorkflowRunError);
+      assert.deepStrictEqual(
+        [error.message, error.code, error.type, error.quickbooksMessage, error.hint],
+        ["Riverbend failed", null, null, null, null]
+      );
+      assert.strictEqual(error.toString(), "Riverbend failed");
+      assert.strictEqual(event.body.error, "Riverbend failed");
+    });
+
+    it("is null when there's none, or it's neither an object nor a String", () => {
+      assert.strictEqual(parse('{"event":"workflow_run.completed"}').error, null);
+      assert.strictEqual(run(null).error, null);
+      assert.strictEqual(run(42).error, null);
+      assert.strictEqual(run(42).body.error, 42);
+      assert.strictEqual(run(["a"]).error, null);
+    });
   });
 
   it("flags a request QuickBooks may have applied", () => {

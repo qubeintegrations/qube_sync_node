@@ -4,6 +4,9 @@ import {
   parse,
   SignatureError,
   WebhookEvent,
+  RequestEvent,
+  WorkflowRunError,
+  WorkflowRunErrorJson,
   SignatureErrorReason,
   VerifyOptions,
   Client,
@@ -23,19 +26,48 @@ import { CustomerMsg } from "qubesync/operations/customer_msg";
 
 declare const rawBody: Uint8Array;
 declare const header: string | undefined;
+declare const requestEvent: RequestEvent;
 
 const options: VerifyOptions = { secrets: ["whsec_a", "whsec_b"], tolerance: 300, now: new Date() };
 
 function handle(event: WebhookEvent): string | null {
   switch (event.type) {
-    case "request":
+    case "request": {
+      const flags: [boolean, boolean] = [event.perhapsApplied, event.responseXmlOmitted];
+      const strings: [string | null, string | null] = [event.errorType, event.selfLink];
+      void flags;
+      void strings;
       return event.dedupeKey ?? event.pageRequestId;
+    }
     case "workflow_run": {
       const apply: boolean = event.newerThan(null);
+      const ids: [string | null, string | null] = [event.headline, event.workflowId];
+      void ids;
+      const error: WorkflowRunError | null = event.error;
+      if (error) {
+        const fields: [number | null, string | null, string | null, string | null, string | null] = [
+          error.code,
+          error.type,
+          error.message,
+          error.quickbooksMessage,
+          error.hint,
+        ];
+        void fields;
+        const text: string = error.toString();
+        const json: WorkflowRunErrorJson = error.toJSON();
+        const qb: string | null = json.quickbooks_message;
+        void text;
+        void qb;
+        // @ts-expect-error: the error is an object, not a string
+        error.startsWith("x");
+      }
       return apply ? event.runState : event.reference;
     }
-    case "notification":
+    case "notification": {
+      const headline: string | null = event.headline;
+      void headline;
       return event.deliveryId;
+    }
     case "connection":
       return event.newerThan(undefined) ? event.connectionId : event.stallReason;
     case "name_index":
@@ -50,6 +82,10 @@ try {
   handle(event);
   handle(verify("{}", "t=1,v1=00", { secrets: "whsec_a", now: 1761000000 }));
   handle(parse("{}"));
+  const fromString: WorkflowRunError | null = WorkflowRunError.from("text");
+  void fromString;
+  new WorkflowRunError({ code: 3100, type: "name_in_use", message: "m", quickbooksMessage: null });
+  new WorkflowRunError();
   const body: unknown = event.body["anything"];
   void body;
 } catch (error) {
@@ -167,6 +203,8 @@ async function useClient(): Promise<void> {
   await client.queueQbxml("c", "<QBXML/>", { webhookUrl: "https://app.test/h" });
   await client.getRequest("c", "q");
   await client.getRequest("https://qubesync.com/api/v2/connections/c/queued-requests/q");
+  const xml: string | null = await client.responseXmlFor(requestEvent);
+  void xml;
   await client.requestPages("c", "q");
   const page: RequestsPage = await client.listRequests("c", { page: 1, pageSize: 50, state: "errored", webhookState: "failed", sort: "inserted_at", sortDirection: "desc", searchPhrase: "A" });
   const total: number = page.meta.total_pages;

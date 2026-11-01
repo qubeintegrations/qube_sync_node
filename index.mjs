@@ -11,6 +11,7 @@ export const {
   Event,
   RequestEvent,
   WorkflowRunEvent,
+  WorkflowRunError,
   NotificationEvent,
   ConnectionEvent,
   NameIndexEvent,
